@@ -66,8 +66,18 @@ def switch(g, order, type):
     return g
 
 
-net_dict = {}
-for net_no in range(10000):
+# Load existing graphs if file exists, otherwise start fresh
+try:
+    with open('switched_graphs.pkl', 'rb') as f:
+        net_dict = pickle.load(f)
+    existing_net_no = max(net_dict.keys()) if net_dict else -1
+    print(f'Loaded {len(net_dict)} existing graphs. Starting from net_no {existing_net_no + 1}')
+except FileNotFoundError:
+    net_dict = {}
+    existing_net_no = -1
+    print('No existing file found. Starting from scratch.')
+    
+for net_no in range(existing_net_no+1,10000):
     topology = np.random.choice(['LPA', 'Copy', 'ER'])
     N = 100 + np.random.randint(101)
     gamma = 2.5 + np.random.rand()
@@ -86,21 +96,20 @@ for net_no in range(10000):
             trial = 0
             m += 1
 
-        match topology:
-            case 'ER':
-                net = ig.Graph.Erdos_Renyi(n=N, p=((N - 1) * m - 1) / (N * (N - 1)))
-            case 'Copy':
-                net = copying_model(N, m, gamma)
-                if m == 1:
-                    r_coeff = 0.01 + 0.04 * np.random.rand() if switch_type == 0 else \
-                              switch_type * np.random.choice([0.05, 0.1, 0.15])
-            case 'LPA':
-                net = LPA(N, m, gamma)
-                if m == 1:
-                    r_coeff = 0.01 + 0.04 * np.random.rand() if switch_type == 0 else \
-                              switch_type * np.random.choice([0.05, 0.1, 0.15])
-            case _:
-                raise 'Topology not valid!!'
+        if topology == 'ER':
+            net = ig.Graph.Erdos_Renyi(n=N, p=((N - 1) * m - 1) / (N * (N - 1)))
+        elif topology == 'Copy':
+            net = copying_model(N, m, gamma)
+            if m == 1:
+                r_coeff = 0.01 + 0.04 * np.random.rand() if switch_type == 0 else \
+                          switch_type * np.random.choice([0.05, 0.1, 0.15])
+        elif topology == 'LPA':
+            net = LPA(N, m, gamma)
+            if m == 1:
+                r_coeff = 0.01 + 0.04 * np.random.rand() if switch_type == 0 else \
+                          switch_type * np.random.choice([0.05, 0.1, 0.15])
+        else:
+            raise Exception('Topology not valid!!')
 
         ordering = 'deg' if np.random.rand() <= 0.5 else 'rnd'
         node_order = np.random.permutation(net.vcount()) if ordering == 'rnd' else net.degree()

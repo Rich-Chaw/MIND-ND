@@ -3,7 +3,7 @@ import torch
 import numpy as np
 import igraph as ig
 from scipy.integrate import simpson
-
+from typing import List,Dict,Tuple
 
 
 class Logger:
@@ -14,12 +14,14 @@ class Logger:
         self.removals = g['removals']
         self.g_init = g['init']
         self.auc = simpson(self.gcc_eps, dx=1)
+        # self.robustness = sum(self.gcc_eps[:-1]) / self.n_init 
+        self.robustness = sum(self.gcc_eps[::-1][:-1]) / self.n_init
 
 
 
 class GraphPool:
     def __init__(self, 
-            graph_data: list[ig.Graph], 
+            graph_data: List[ig.Graph], 
             size: int, 
             rng: np.random.Generator, 
             is_val: bool = False, 
@@ -31,7 +33,7 @@ class GraphPool:
         self.is_val = is_val
         self.render = render
 
-        self.graphs:  list[ig.Graph] = []
+        self.graphs: List[ig.Graph] = []
 
         n_slots = min(self.size, len(self.graph_data))
         for i in range(n_slots):
@@ -92,7 +94,7 @@ class GraphPool:
                 self.graphs[i].delete_vertices(delete_idx)
 
 
-    def get_lcc_sizes(self)->tuple[np.ndarray, np.ndarray, dict[Logger]]:
+    def get_lcc_sizes(self)->Tuple[np.ndarray, np.ndarray, List[Logger]]:
         b_size = len(self.graphs)
         lcc_arr = np.empty(b_size, dtype=np.float32); done_arr = np.empty(b_size, dtype=bool)
         for i, g in enumerate(self.graphs):

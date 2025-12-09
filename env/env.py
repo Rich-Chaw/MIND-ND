@@ -1,19 +1,20 @@
 import os
 import numpy as np
 import igraph as ig
+from typing import List, Union, Optional
 
 from env.graph_pool import GraphPool
 from utils import plot_process, load_g
 
 class DismantleEnv:
     def __init__(self,
-            data_dir: str | None = None,
-            graph_data: list[ig.Graph] | None = None,
+            data_dir: Optional[str] = None,
+            graph_data: Optional[List[ig.Graph]] = None,
             batch_size: int=1,
             is_val: bool=False,
             seed: int=0,
             remove_scc: bool=True,
-            render: bool | str = False
+            render: Union[bool, str] = False
         ):
         if bool(data_dir) ^ bool(graph_data):
             if data_dir:
@@ -43,7 +44,7 @@ class DismantleEnv:
         
         return [g.copy() for g in self.pool.graphs], {}
 
-    def sample_act(self)->np.ndarray:
+    def sample_act(self) -> np.ndarray:
         return self.pool.sample_nodes()
 
     def step(self, act_arr):
@@ -62,7 +63,7 @@ class DismantleEnv:
                     plot_process(logger.g_init, logger.removals, logger.gcc_eps)
         return [g.copy() for g in self.pool.graphs], reward_arr, done_arr, info
     
-    def reset_async(self, done_arr: np.ndarray) -> tuple[list[ig.Graph], list]:
+    def reset_async(self, done_arr: np.ndarray) -> tuple:
         replaced_ids = []
         # iterate in reverse so index shifts don't break subsequent pops
         for done_id in np.flatnonzero(done_arr)[::-1]:

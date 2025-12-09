@@ -27,13 +27,13 @@ class Args:
     device: str='cuda:0'
     """the device to use"""
     num_envs: int=64
-    """number of parallel environments"""
+    """number of parallel environments,default 64"""
     total_steps: int=200000
     """number of training steps (transitions = steps*num_envs)"""
     buffer_size: int=2000000
     """size of the replay buffer"""
-    batch_size: int=512
-    """batch size for updating networks"""
+    batch_size: int=128
+    """batch size for updating network, default 512"""
     val_frequency: int=1000
     """validation frequency"""
     save_frequency: int=1000
@@ -135,7 +135,7 @@ if __name__ == "__main__":
             auc_buffer.append(logger.auc/logger.n_init)
         
         if global_step % args.val_frequency == 0 and global_step >= args.learning_starts:
-            val_auc_list, _ = validate(env_val, policy)
+            val_auc_list = validate(env_val, policy)[0]
             auc_val_avg = sum(val_auc_list)/len(val_auc_list)
             print(f'At step {global_step}, Avg. Validation AUC is {auc_val_avg:.4f}')
             

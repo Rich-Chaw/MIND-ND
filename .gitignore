@@ -1,1 +1,9 @@
-/test.out
+*.out
+./*.pkl
+.vscode/
+FINDER/
+runs/
+results/
+saved/*
+!saved/mind.ckpt
+switched_graphs*

@@ -30,6 +30,13 @@ class MINDConv(nn.Module):
         )
 
     def forward(self, h, edge_index):
+        '''
+        edge_index=(src,dst) message passing direction: src -> dst
+            src [E] dst [E]
+        h [N,F]
+
+        return h_next [N,F]
+        '''
         src, dst = edge_index  # message passing direction: src -> dst
         N, F, H = h.shape[0], self.F, self.H
         D, E = F//H, len(src)
@@ -37,7 +44,7 @@ class MINDConv(nn.Module):
         g_src = self.W_src(h) # -> (N, F)
         g_dst = self.W_dst(h) # -> (N, F)
 
-        msg_src, msg_dst = g_src[src], g_dst[dst] # -> (E, F)
+        msg_src, msg_dst = g_src[src], g_dst[dst] # -> (E, F), (E, F)
         
         a_src = torch.sigmoid(self.mlp_a_src(msg_src+msg_dst)).unsqueeze(-1) # -> (E, H, 1)
         a_dst = torch.sigmoid(self.mlp_a_dst(g_dst)).unsqueeze(-1)           # -> (N, H, 1)
@@ -52,14 +59,19 @@ class MINDConv(nn.Module):
 class MIND(nn.Module):
     def __init__(self, num_features, num_heads, num_mps):
         super().__init__()
-        self.num_features = num_features
+        self.num_features = num_features # F
         self.register_buffer("x_init", torch.ones(1, num_features))
-        self.num_mps = num_mps
+        self.num_mps = num_mps # K
         self.convs = nn.ModuleList([MINDConv(num_features, num_heads) for _ in range(num_mps)])
         self.graph_norm = GraphNorm(num_features*num_mps, eps=1e-4)
 
     def forward(self, g: Batch):
+        '''
+        return x_profile (N-B,2KF)
+        '''
+        # (N,KF)
         x_profile = torch.empty(g.total_nodes, self.num_features*self.num_mps, device=self.x_init.device)
+        # (N,F)
         x_k = self.x_init.expand(g.total_nodes, -1)
         for k, conv in enumerate(self.convs):
             x_k = conv(x_k, g.edge_index)
@@ -69,6 +81,6 @@ class MIND(nn.Module):
         x_profile = self.graph_norm(x_profile, g.batch)
         x_profile = torch.cat([
             x_profile[g.non_omni_mask],
-            x_profile[g.omni_ids][g.batch_non_omni]
+            x_profile[g.omni_ids[g.batch_non_omni]]
         ], dim=1)
         return x_profile

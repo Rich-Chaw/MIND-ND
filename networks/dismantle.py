@@ -43,7 +43,7 @@ class SACPolicy(nn.Module):
         )
     
     def forward(self, g:Batch):
-        e = self.graph_embedding(g)
+        e = self.graph_embedding(g) #[N,2KF]
         logits = self.mlp(e).flatten()
         return logits
     
