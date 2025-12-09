@@ -7,3 +7,4 @@ results/
 saved/*
 !saved/mind.ckpt
 switched_graphs*
+__pycache__/
