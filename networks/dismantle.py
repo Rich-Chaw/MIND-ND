@@ -48,6 +48,11 @@ class SACPolicy(nn.Module):
         return logits
     
     def get_action(self, g:Batch, val=False):
+        '''
+        return 
+            act: action for each graph [B]
+            log_probs: [N]
+        '''
         logits = self(g)
         log_probs = scatter_log_softmax(logits, g.batch_non_omni, dim_size=g.batch_size)
         if val:

@@ -8,18 +8,20 @@ def ig_to_data(g):
 
 class Graph:
     def __init__(self, edge_index, num_nodes):
-        self.edge_index = edge_index  # shape (2, E)
-        self.num_nodes = num_nodes
+        self.edge_index = edge_index   # == g.get_edgelist()^T  (2,g.ecount())
+        self.num_nodes = num_nodes     # == g.vount()
 
-# a Batch graphs as a GRAPH
+# a Batch graphs as a Batch
 class Batch:
     def __init__(self, device, graph_array):
         self.device = device
-        self.batch_size = len(graph_array)
+        self.batch_size = len(graph_array) # B
 
-        num_nodes_b = np.array([g.num_nodes+1 for g in graph_array], dtype=np.int64) # add a omni-node
+        # add a omni-node [N_1+1,N_2+1,...] (B)
+        num_nodes_b = np.array([g.num_nodes+1 for g in graph_array], dtype=np.int64) 
+        # [0, N_1+1, N_1+N_2+2, ...,N_1+N_{B-1}+B-1] (B)
         start_ids = np.zeros(self.batch_size, dtype=np.int64)
-        start_ids[1:] = np.cumsum(num_nodes_b[:-1]) # [0, N1, N1+N2, ...]
+        start_ids[1:] = np.cumsum(num_nodes_b[:-1])
 
         act_offsets = start_ids - np.arange(self.batch_size)
 
@@ -30,14 +32,14 @@ class Batch:
         edge_index = np.concatenate([g.edge_index+s for s, g in zip(start_ids, graph_array)], axis=1)
 
         self.num_nodes_b = torch.tensor(num_nodes_b, dtype=torch.long, device=self.device)
-        self.total_nodes = self.num_nodes_b.sum()
+        self.total_nodes = self.num_nodes_b.sum() # N+B
 
         self.act_offsets = torch.tensor(act_offsets, dtype=torch.long, device=self.device)
 
-        self.omni_ids = torch.tensor(omni_ids, dtype=torch.long, device=self.device)  #[B]
-        self.non_omni_mask = torch.ones(self.total_nodes, dtype=torch.bool, device=self.device) #[N]
+        self.omni_ids = torch.tensor(omni_ids, dtype=torch.long, device=self.device)  # (B)
+        self.non_omni_mask = torch.ones(self.total_nodes, dtype=torch.bool, device=self.device) #(N+B)
         self.non_omni_mask[self.omni_ids] = False
 
         self.edge_index = torch.tensor(edge_index, dtype=torch.long, device=self.device)
         self.batch = torch.tensor(batch, dtype=torch.long, device=self.device)
-        self.batch_non_omni = self.batch[self.non_omni_mask] #[N-B,B]
+        self.batch_non_omni = self.batch[self.non_omni_mask] #(N,B)

@@ -41,8 +41,10 @@ class GraphPool:
             g = g.copy()
 
             n_init = g.vcount()
-            g.vs["i_init"] = list(range(n_init))
-            g['n_init'] = n_init; g['gcc_eps'] = []; g['removals'] = []
+            g.vs["i_init"] = list(range(n_init))  # original node id
+            g['n_init'] = n_init;                 # original node count 
+            g['gcc_eps'] = [];                    # lcc list which remove, used for auc and robustness
+            g['removals'] = []                    # removed nodes
             g['init'] = g.copy() if self.render == 'plot' else None
             if self.is_val:
                 print(f"Loaded graph {g['name']}")
@@ -88,6 +90,7 @@ class GraphPool:
             cc_sizes = np.array(cc.sizes()); membership = np.array(cc.membership)
             gcc_idx = int(cc_sizes.argmax())
             threshold = 0.1 * self.graphs[i]['n_init']
+            # True: node belongs to small cc and not belongs to gcc, need to be delete
             delete_mask = (cc_sizes[membership] < threshold) & (membership != gcc_idx)
             delete_idx = np.flatnonzero(delete_mask)
             if delete_idx.size:
@@ -95,11 +98,19 @@ class GraphPool:
 
 
     def get_lcc_sizes(self)->Tuple[np.ndarray, np.ndarray, List[Logger]]:
+        '''
+        return:
+            lcc_arr: lcc=lcc_size/n_init for each graph (B)
+            done_arr: if done for each graph lcc_size < 0.1  (B)
+            Logger: Logger for each done graph
+        '''
         b_size = len(self.graphs)
         lcc_arr = np.empty(b_size, dtype=np.float32); done_arr = np.empty(b_size, dtype=bool)
         for i, g in enumerate(self.graphs):
             lcc_size = g.connected_components().giant().vcount() / self.graphs[i]['n_init']
-            lcc_arr[i] = lcc_size; done_arr[i] = (lcc_size < 0.1)
+            lcc_arr[i] = lcc_size
+            # done_arr[i] = (lcc_size < 0.1)
+            done_arr[i] = (lcc_size < 0.1 or g.ecount == 0)
             self.graphs[i]['gcc_eps'].append(lcc_size)
         return lcc_arr, done_arr, [Logger(self.graphs[i]) for i in np.where(done_arr)[0]]
    
