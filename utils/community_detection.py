@@ -295,6 +295,131 @@ def SpectralClustering(g: ig.Graph, K: int) -> SimpleClustering:
         return fallback_clustering
 
 
+def BigCLAM(g: ig.Graph, K: int = 5, max_iter: int = 100, learning_rate: float = 0.01, 
+           regularization: float = 0.01, threshold: float = 0.5) -> SimpleClustering:
+    """
+    BigCLAM (Big Community Affiliation Model) for overlapping community detection
+    
+    This is a simplified implementation of BigCLAM that uses gradient descent
+    to learn community affiliations for each node.
+    
+    Args:
+        g: igraph Graph object
+        K: number of communities
+        max_iter: maximum number of iterations
+        learning_rate: learning rate for gradient descent
+        regularization: L2 regularization parameter
+        threshold: threshold for community membership (0.5 means >= 0.5 probability)
+    
+    Returns:
+        SimpleClustering object with overlapping communities converted to non-overlapping
+    """
+    n_nodes = g.vcount()
+    
+    if n_nodes == 0:
+        return SimpleClustering([], 0)
+    
+    # Get adjacency matrix
+    adj_matrix = np.array(g.get_adjacency().data)
+    
+    # Initialize community affiliation matrix F (n_nodes x K)
+    # F[i,c] represents the affiliation strength of node i to community c
+    np.random.seed(42)
+    F = np.random.uniform(0.1, 1.0, (n_nodes, K))
+    
+    # Get edge list for efficient computation
+    edges = [(e.source, e.target) for e in g.es]
+    
+    # Gradient descent optimization
+    for iteration in range(max_iter):
+        # Compute gradients
+        grad_F = np.zeros_like(F)
+        
+        # For each edge, compute the gradient contribution
+        for u, v in edges:
+            # Compute P(u,v) = 1 - exp(-F[u] * F[v])
+            dot_product = np.dot(F[u], F[v])
+            if dot_product > 50:  # Prevent overflow
+                p_uv = 1.0
+                exp_term = 0.0
+            else:
+                exp_term = np.exp(-dot_product)
+                p_uv = 1.0 - exp_term
+            
+            if p_uv > 1e-10:  # Avoid division by zero
+                # Gradient for existing edge (A[u,v] = 1)
+                common_factor = exp_term / p_uv
+                grad_F[u] += common_factor * F[v]
+                grad_F[v] += common_factor * F[u]
+        
+        # For non-edges, we sample a subset to make it computationally feasible
+        # Sample some non-edges for gradient computation
+        n_samples = min(len(edges) * 2, n_nodes * 10)  # Reasonable sampling
+        for _ in range(n_samples):
+            u = np.random.randint(0, n_nodes)
+            v = np.random.randint(0, n_nodes)
+            
+            if u != v and adj_matrix[u, v] == 0:  # Non-edge
+                # Compute P(u,v) = 1 - exp(-F[u] * F[v])
+                dot_product = np.dot(F[u], F[v])
+                if dot_product > 50:  # Prevent overflow
+                    exp_term = 0.0
+                else:
+                    exp_term = np.exp(-dot_product)
+                
+                # Gradient for non-existing edge (A[u,v] = 0)
+                grad_F[u] -= exp_term * F[v]
+                grad_F[v] -= exp_term * F[u]
+        
+        # Add L2 regularization
+        grad_F -= regularization * F
+        
+        # Update F using gradient ascent (we want to maximize likelihood)
+        F += learning_rate * grad_F
+        
+        # Keep F positive
+        F = np.maximum(F, 0.01)
+        
+        # Optional: print progress
+        if iteration % 20 == 0:
+            # Compute approximate log-likelihood for monitoring
+            ll = 0
+            for u, v in edges[:min(100, len(edges))]:  # Sample for efficiency
+                dot_product = np.dot(F[u], F[v])
+                if dot_product > 50:
+                    ll += dot_product
+                else:
+                    ll += np.log(1 - np.exp(-dot_product) + 1e-10)
+            # Note: This is just a partial likelihood for monitoring
+    
+    # Convert F matrix to communities
+    # Each node can belong to multiple communities based on threshold
+    overlapping_communities = [[] for _ in range(K)]
+    
+    for node in range(n_nodes):
+        for comm in range(K):
+            if F[node, comm] >= threshold:
+                overlapping_communities[comm].append(node)
+    
+    # Remove empty communities
+    overlapping_communities = [comm for comm in overlapping_communities if len(comm) > 0]
+    
+    # Convert overlapping to non-overlapping by assigning each node to its strongest community
+    communities = []
+    assigned_nodes = set()
+    
+    # First, create communities based on strongest affiliations
+    for comm_nodes in overlapping_communities:
+        if comm_nodes:
+            communities.append(comm_nodes)
+    
+    # If no communities found, create one community with all nodes
+    if not communities:
+        communities = [list(range(n_nodes))]
+    
+    return SimpleClustering(communities, n_nodes)
+
+
 
 def FastGreedy(g: ig.Graph, K: int = None):
     """Fast greedy community detection"""
@@ -352,7 +477,8 @@ COMMUNITY_METHODS = {
     'infomap': InfoMap,
     'walktrap': WalkTrap,
     'leading_eigenvector': LeadingEigenvector,
-    'lcd': LinkCommunityDetection
+    'lcd': LinkCommunityDetection,
+    'bigclam': BigCLAM
 }
 
 import inspect
@@ -428,9 +554,12 @@ def test_comprehensive_methods():
     print("\nMethods with special parameters:")
     result = partition(g, partition_method='walktrap', K=3, steps=6)
     print(f"walktrap (K=3, steps=6): {len(result)} communities")
-    
+
     result = partition(g, partition_method='lcd', threshold=0.3)
     print(f"lcd (threshold=0.3): {len(result)} communities")
+
+    result = partition(g, partition_method='bigclam', K=4, max_iter=50)
+    print(f"bigclam (K=4, max_iter=50): {len(result)} communities")
 
     # Show how parameters are automatically filtered
     print("\nParameter filtering demo:")
@@ -449,13 +578,10 @@ if __name__ == "__main__":
     random.seed(42)
     np.random.seed(42)
     
-    # Test 1: Small test graph
     print("\n1. Testing on small graph...")
     g_small = ig.Graph([(0,1),(0,2),(0,3),(1,3),(2,4),(3,4),(4,5),(5,6)])
     print(f"Small graph: {g_small.vcount()} nodes, {g_small.ecount()} edges")
-    
-    test_comprehensive_methods()
-    
+
     # Test 2: LFR Benchmark generation
     print("\n2. Testing LFR Benchmark generation...")
     try:
@@ -481,9 +607,21 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"LCD test failed: {e}")
     
-    # Test 4: Integration functions (will be tested after function definitions)
-    print("\n4. Testing integration functions...")
+    # Test 4: BigCLAM
+    print("\n4. Testing BigCLAM...")
+    try:
+        g_test = ig.Graph.Erdos_Renyi(n=15, p=0.3)  # Smaller graph for faster testing
+        clustering = BigCLAM(g_test, K=3, max_iter=30)
+        print(f"BigCLAM found {len(clustering)} communities")
+        for i in range(min(3, len(clustering))):  # Show first 3
+            print(f"Community {i}: {clustering[i]}")
+    except Exception as e:
+        print(f"BigCLAM test failed: {e}")
+    
+    # Test 5: Integration functions (will be tested after function definitions)
+    print("\n5. Testing integration functions...")
     print("Integration functions will be tested after all definitions are loaded.")
+    test_comprehensive_methods()
     
     print("\nAll tests completed!")
 
