@@ -456,7 +456,7 @@ def select(g: ig.Graph, clustering, heuristic: str = 'cbs', k: int = 1, **kwargs
     Returns:
         List of node indices with highest scores according to the specified method
     """
-    
+    # print(f"k={k}")
     if heuristic in PRIVATE_COMMUNITY_HEURISTICS:
         selected_nodes = set()
         for i in range(len(clustering)):
@@ -471,13 +471,13 @@ def select(g: ig.Graph, clustering, heuristic: str = 'cbs', k: int = 1, **kwargs
                                         k=k, 
                                         **kwargs)
                 if best_nodes_in_comm:
-                    best_node_in_comm_subgraph = best_nodes_in_comm[0]
+                    # best_node_in_comm_subgraph = best_nodes_in_comm[0]
                     # Map from community subgraph index -> LCC subgraph index -> current graph index
-                    current_graph_node_id = comm_nodes[best_node_in_comm_subgraph]
-                    selected_nodes.add(current_graph_node_id)
+                    current_graph_node_id = [comm_nodes[node_id] for node_id in best_nodes_in_comm]
+                    selected_nodes.update(current_graph_node_id)
         return list(selected_nodes)
 
-    if heuristic in GLOBAL_COMMUNITY_HEURISTICS:
+    elif heuristic in GLOBAL_COMMUNITY_HEURISTICS:
         # Automatically filter kwargs to only pass valid parameters
         selected_nodes = _call_with_valid_params(
                                     GLOBAL_COMMUNITY_HEURISTICS[heuristic], 
@@ -486,6 +486,9 @@ def select(g: ig.Graph, clustering, heuristic: str = 'cbs', k: int = 1, **kwargs
                                     k = k*len(clustering),
                                     **kwargs)
         return selected_nodes
+    else:
+        available = list(PRIVATE_COMMUNITY_HEURISTICS.keys()) + list(GLOBAL_COMMUNITY_HEURISTICS.keys())
+        raise ValueError(f"Unknown heuristic: {heuristic}. Available methods: {available}")
 
 
 def test_community_heuristics():

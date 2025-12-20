@@ -14,7 +14,7 @@ def load_dismantler(F, H, K, device, ckpt_pth=None):
     qf1_target = SACQNetwork(F, H, K).to(device)
     qf2_target = SACQNetwork(F, H, K).to(device)
     if ckpt_pth != None:
-        ckpt = torch.load(ckpt_pth, weights_only=True)
+        ckpt = torch.load(ckpt_pth)
         policy.load_state_dict(ckpt['policy_state_dict'])
         qf1.load_state_dict(ckpt['qf1_state_dict'])
         qf2.load_state_dict(ckpt['qf2_state_dict'])

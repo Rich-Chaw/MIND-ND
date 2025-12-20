@@ -322,7 +322,7 @@ def BigCLAM(g: ig.Graph, K: int = 5, max_iter: int = 100, learning_rate: float =
     # Get adjacency matrix
     adj_matrix = np.array(g.get_adjacency().data)
     
-    # Initialize community affiliation matrix F (n_nodes x K)
+    # Initialize community affiliation matrix F (n_nodes, K)
     # F[i,c] represents the affiliation strength of node i to community c
     np.random.seed(42)
     F = np.random.uniform(0.1, 1.0, (n_nodes, K))
@@ -467,6 +467,412 @@ def WalkTrap(g: ig.Graph, K: int = None, steps: int = 4):
         return communities.as_clustering()
 
 
+def METIS(g: ig.Graph, K: int = 2, objective: str = 'cut', 
+          ufactor: int = 1, seed: int = 42) -> SimpleClustering:
+    """
+    METIS graph partitioning algorithm
+    
+    METIS is a multilevel graph partitioning algorithm that produces high-quality
+    balanced partitions. It's particularly effective for creating communities of
+    roughly equal size with minimal edge cuts between them.
+    
+    Args:
+        g: igraph Graph object
+        K: number of partitions/communities (must be >= 2)
+        objective: partitioning objective ('cut' or 'vol')
+            - 'cut': minimize edge cut
+            - 'vol': minimize communication volume
+        ufactor: load imbalance factor (1-1000, higher allows more imbalance)
+        seed: random seed for reproducibility
+    
+    Returns:
+        SimpleClustering object with K balanced communities
+    """
+    n_nodes = g.vcount()
+    
+    if n_nodes == 0:
+        return SimpleClustering([], 0)
+    
+    if n_nodes == 1:
+        return SimpleClustering([[0]], 1)
+    
+    if K < 2:
+        K = 2
+    
+    if K >= n_nodes:
+        # If K >= number of nodes, put each node in its own community
+        return SimpleClustering([[i] for i in range(n_nodes)], n_nodes)
+    
+    try:
+        # Try using pymetis if available
+        import pymetis
+        
+        # Convert igraph to adjacency list format for pymetis
+        adjacency_list = []
+        for i in range(n_nodes):
+            neighbors = g.neighbors(i)
+            adjacency_list.append(neighbors)
+        
+        # Perform partitioning using the correct pymetis API
+        # pymetis.part_graph(nparts, adjacency, recursive=None)
+        # Note: pymetis doesn't support seed, ufactor, or objtype parameters directly
+        edge_cuts, membership = pymetis.part_graph(
+            nparts=K, 
+            adjacency=adjacency_list,
+            recursive=None  # Use default recursive partitioning
+        )
+        
+        # Convert membership to communities
+        communities = [[] for _ in range(K)]
+        for node, comm_id in enumerate(membership):
+            communities[comm_id].append(node)
+        
+        # Remove empty communities (shouldn't happen with METIS but safety check)
+        communities = [comm for comm in communities if len(comm) > 0]
+        
+        return SimpleClustering(communities, n_nodes)
+        
+    except ImportError:
+        # Fallback: Use a simple balanced k-way partitioning algorithm
+        print("Warning: pymetis not available, using fallback balanced partitioning")
+        return _balanced_partition_fallback(g, K, seed)
+    
+    except Exception as e:
+        print(f"Warning: METIS failed ({e}), using fallback")
+        return _balanced_partition_fallback(g, K, seed)
+
+
+def _balanced_partition_fallback(g: ig.Graph, K: int, seed: int = 42) -> SimpleClustering:
+    """
+    Fallback balanced partitioning when METIS is not available
+    
+    Uses a greedy approach to create roughly balanced partitions while
+    trying to minimize edge cuts.
+    """
+    n_nodes = g.vcount()
+    np.random.seed(seed)
+    
+    # Target size for each partition
+    target_size = n_nodes // K
+    remainder = n_nodes % K
+    
+    # Initialize communities
+    communities = [[] for _ in range(K)]
+    assigned = set()
+    
+    # Start with random nodes for each community
+    start_nodes = np.random.choice(n_nodes, K, replace=False)
+    for i, node in enumerate(start_nodes):
+        communities[i].append(node)
+        assigned.add(node)
+    
+    # Greedily assign remaining nodes
+    unassigned = [i for i in range(n_nodes) if i not in assigned]
+    
+    while unassigned:
+        node = unassigned.pop(0)
+        
+        # Find the best community for this node
+        best_comm = 0
+        best_score = -1
+        
+        for comm_id in range(K):
+            # Check if community has space
+            max_size = target_size + (1 if comm_id < remainder else 0)
+            if len(communities[comm_id]) >= max_size:
+                continue
+            
+            # Calculate connection score to this community
+            connections = 0
+            for neighbor in g.neighbors(node):
+                if neighbor in communities[comm_id]:
+                    connections += 1
+            
+            # Prefer communities with more connections and smaller size
+            size_penalty = len(communities[comm_id]) / max_size
+            score = connections - size_penalty
+            
+            if score > best_score:
+                best_score = score
+                best_comm = comm_id
+        
+        communities[best_comm].append(node)
+    
+    # Remove empty communities
+    communities = [comm for comm in communities if len(comm) > 0]
+    
+    return SimpleClustering(communities, n_nodes)
+
+
+def CODA(g: ig.Graph, K: int = None, outlier_threshold: float = 0.1, 
+         max_iter: int = 100, convergence_tol: float = 1e-4) -> SimpleClustering:
+    """
+    Community Outlier Detection Algorithm (CODA)
+    
+    Detects both communities and outliers in networks by iteratively optimizing
+    community assignments while identifying nodes that don't fit well into any community.
+    Returns only the communities (outliers are filtered out).
+    
+    Args:
+        g: igraph Graph object
+        K: number of communities (if None, estimated automatically)
+        outlier_threshold: threshold for outlier detection (0-1, higher = more outliers)
+        max_iter: maximum number of iterations
+        convergence_tol: convergence tolerance for stopping criterion
+    
+    Returns:
+        SimpleClustering object with communities (outliers excluded)
+    """
+    n_nodes = g.vcount()
+    
+    if n_nodes == 0:
+        return SimpleClustering([], 0)
+    
+    if g.ecount() == 0:
+        return SimpleClustering([[i] for i in range(n_nodes)], n_nodes)
+    
+    # Estimate K if not provided
+    if K is None:
+        # Use modularity-based estimation
+        try:
+            temp_clustering = g.community_louvain()
+            K = len(temp_clustering)
+        except:
+            K = max(2, int(np.sqrt(n_nodes)))
+    
+    # Get adjacency matrix and degree sequence
+    adj_matrix = np.array(g.get_adjacency().data)
+    degrees = np.array(g.degree())
+    
+    # Initialize community assignments randomly
+    np.random.seed(42)
+    membership = np.random.randint(0, K, n_nodes)
+    
+    # Initialize outlier scores
+    outlier_scores = np.zeros(n_nodes)
+    
+    prev_membership = None
+    
+    for iteration in range(max_iter):
+        # Update community assignments
+        new_membership = membership.copy()
+        
+        for node in range(n_nodes):
+            best_community = membership[node]
+            best_score = -np.inf
+            
+            # Try each community
+            for comm in range(K):
+                # Calculate modularity contribution
+                internal_edges = 0
+                external_edges = 0
+                
+                for neighbor in g.neighbors(node):
+                    if membership[neighbor] == comm:
+                        internal_edges += 1
+                    else:
+                        external_edges += 1
+                
+                # Community fitness score
+                if degrees[node] > 0:
+                    fitness = internal_edges / degrees[node] - external_edges / (2 * g.ecount())
+                else:
+                    fitness = 0
+                
+                if fitness > best_score:
+                    best_score = fitness
+                    best_community = comm
+            
+            new_membership[node] = best_community
+            
+            # Update outlier score based on community fitness
+            outlier_scores[node] = max(0, outlier_threshold - best_score)
+        
+        # Check convergence
+        if prev_membership is not None:
+            changes = np.sum(membership != new_membership)
+            if changes / n_nodes < convergence_tol:
+                break
+        
+        prev_membership = membership.copy()
+        membership = new_membership
+    
+    # Identify outliers
+    outlier_nodes = set(np.where(outlier_scores > outlier_threshold)[0])
+    
+    # Build communities excluding outliers
+    communities = [[] for _ in range(K)]
+    for node in range(n_nodes):
+        if node not in outlier_nodes:
+            communities[membership[node]].append(node)
+    
+    # Remove empty communities
+    communities = [comm for comm in communities if len(comm) > 0]
+    
+    # If no valid communities, create one with all non-outlier nodes
+    if not communities:
+        non_outliers = [i for i in range(n_nodes) if i not in outlier_nodes]
+        if non_outliers:
+            communities = [non_outliers]
+        else:
+            communities = [list(range(n_nodes))]  # Fallback: include all nodes
+    
+    return SimpleClustering(communities, n_nodes)
+
+
+def GSBM(g: ig.Graph, K: int = None, max_iter: int = 100, 
+         alpha: float = 0.1, beta: float = 0.1) -> SimpleClustering:
+    """
+    Generalized Stochastic Block Model (GSBM)
+    
+    A probabilistic model that can detect communities and handle outliers
+    by modeling the network as a mixture of communities and background noise.
+    Returns only the communities (background/outlier nodes are filtered out).
+    
+    Args:
+        g: igraph Graph object
+        K: number of communities (if None, estimated automatically)
+        max_iter: maximum number of EM iterations
+        alpha: Dirichlet prior parameter for community proportions
+        beta: Beta prior parameter for edge probabilities
+    
+    Returns:
+        SimpleClustering object with communities (outliers/background excluded)
+    """
+    n_nodes = g.vcount()
+    
+    if n_nodes == 0:
+        return SimpleClustering([], 0)
+    
+    if g.ecount() == 0:
+        return SimpleClustering([[i] for i in range(n_nodes)], n_nodes)
+    
+    # Estimate K if not provided
+    if K is None:
+        try:
+            temp_clustering = g.community_louvain()
+            K = len(temp_clustering)
+        except:
+            K = max(2, int(np.sqrt(n_nodes)))
+    
+    # Add background/outlier class
+    K_total = K + 1  # K communities + 1 background class
+    
+    # Get adjacency matrix
+    adj_matrix = np.array(g.get_adjacency().data)
+    
+    # Initialize parameters
+    np.random.seed(42)
+    
+    # Community proportions (including background)
+    pi = np.ones(K_total) / K_total
+    
+    # Edge probabilities: within-community, between-community, background
+    p_within = np.random.uniform(0.3, 0.7, K)  # Higher probability within communities
+    p_between = np.random.uniform(0.01, 0.1, (K, K))  # Lower between communities
+    p_background = np.random.uniform(0.01, 0.05)  # Very low for background
+    
+    # Responsibility matrix (soft assignments)
+    gamma = np.random.dirichlet(np.ones(K_total), n_nodes)
+    
+    # EM algorithm
+    for iteration in range(max_iter):
+        # E-step: Update responsibilities
+        new_gamma = np.zeros((n_nodes, K_total))
+        
+        for i in range(n_nodes):
+            for k in range(K_total):
+                # Calculate log-likelihood for node i in community k
+                log_likelihood = np.log(pi[k] + 1e-10)
+                
+                for j in range(n_nodes):
+                    if i != j:
+                        if k < K:  # Regular community
+                            # Probability of edge (i,j) given both in community k
+                            if adj_matrix[i, j] == 1:
+                                log_likelihood += np.log(p_within[k] + 1e-10)
+                            else:
+                                log_likelihood += np.log(1 - p_within[k] + 1e-10)
+                        else:  # Background class
+                            if adj_matrix[i, j] == 1:
+                                log_likelihood += np.log(p_background + 1e-10)
+                            else:
+                                log_likelihood += np.log(1 - p_background + 1e-10)
+                
+                new_gamma[i, k] = log_likelihood
+        
+        # Normalize responsibilities
+        for i in range(n_nodes):
+            max_log = np.max(new_gamma[i])
+            new_gamma[i] -= max_log  # Numerical stability
+            new_gamma[i] = np.exp(new_gamma[i])
+            new_gamma[i] /= np.sum(new_gamma[i]) + 1e-10
+        
+        # M-step: Update parameters
+        # Update community proportions
+        pi = np.mean(new_gamma, axis=0) + alpha / K_total
+        pi /= np.sum(pi)
+        
+        # Update edge probabilities
+        for k in range(K):
+            numerator = 0
+            denominator = 0
+            
+            for i in range(n_nodes):
+                for j in range(i + 1, n_nodes):
+                    weight = new_gamma[i, k] * new_gamma[j, k]
+                    numerator += weight * adj_matrix[i, j]
+                    denominator += weight
+            
+            if denominator > 0:
+                p_within[k] = (numerator + beta) / (denominator + 2 * beta)
+            else:
+                p_within[k] = 0.5
+        
+        # Update background probability
+        numerator = 0
+        denominator = 0
+        for i in range(n_nodes):
+            for j in range(i + 1, n_nodes):
+                weight = new_gamma[i, K] * new_gamma[j, K]  # Background class
+                numerator += weight * adj_matrix[i, j]
+                denominator += weight
+        
+        if denominator > 0:
+            p_background = (numerator + beta) / (denominator + 2 * beta)
+        else:
+            p_background = 0.01
+        
+        # Check convergence
+        if iteration > 0:
+            diff = np.mean(np.abs(gamma - new_gamma))
+            if diff < 1e-4:
+                break
+        
+        gamma = new_gamma
+    
+    # Assign nodes to communities (hard assignment)
+    assignments = np.argmax(gamma, axis=1)
+    
+    # Build communities excluding background class (class K)
+    communities = [[] for _ in range(K)]
+    for node in range(n_nodes):
+        if assignments[node] < K:  # Not background
+            communities[assignments[node]].append(node)
+    
+    # Remove empty communities
+    communities = [comm for comm in communities if len(comm) > 0]
+    
+    # If no valid communities, fall back to simple clustering
+    if not communities:
+        try:
+            fallback = g.community_louvain()
+            communities = [list(fallback[i]) for i in range(len(fallback))]
+        except:
+            communities = [list(range(n_nodes))]
+    
+    return SimpleClustering(communities, n_nodes)
+
 
 # Simple registry - just functions with their natural signatures
 COMMUNITY_METHODS = {
@@ -478,7 +884,10 @@ COMMUNITY_METHODS = {
     'walktrap': WalkTrap,
     'leading_eigenvector': LeadingEigenvector,
     'lcd': LinkCommunityDetection,
-    'bigclam': BigCLAM
+    'bigclam': BigCLAM,
+    'coda': CODA,
+    'gsbm': GSBM,
+    'metis': METIS
 }
 
 import inspect
@@ -561,6 +970,15 @@ def test_comprehensive_methods():
     result = partition(g, partition_method='bigclam', K=4, max_iter=50)
     print(f"bigclam (K=4, max_iter=50): {len(result)} communities")
 
+    result = partition(g, partition_method='coda', K=3, outlier_threshold=0.15)
+    print(f"coda (K=3, outlier_threshold=0.15): {len(result)} communities")
+
+    result = partition(g, partition_method='gsbm', K=3, max_iter=50)
+    print(f"gsbm (K=3, max_iter=50): {len(result)} communities")
+
+    result = partition(g, partition_method='metis', K=4, objective='cut')
+    print(f"metis (K=4, objective='cut'): {len(result)} communities")
+
     # Show how parameters are automatically filtered
     print("\nParameter filtering demo:")
     print("Passing K=5 to label_propagation (which doesn't use K) - should work fine:")
@@ -618,8 +1036,43 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"BigCLAM test failed: {e}")
     
-    # Test 5: Integration functions (will be tested after function definitions)
-    print("\n5. Testing integration functions...")
+    # Test 5: CODA
+    print("\n5. Testing CODA...")
+    try:
+        g_test = ig.Graph.Erdos_Renyi(n=20, p=0.2)
+        clustering = CODA(g_test, K=3, outlier_threshold=0.1)
+        print(f"CODA found {len(clustering)} communities")
+        for i in range(min(3, len(clustering))):  # Show first 3
+            print(f"Community {i}: {clustering[i]}")
+    except Exception as e:
+        print(f"CODA test failed: {e}")
+    
+    # Test 6: GSBM
+    print("\n6. Testing GSBM...")
+    try:
+        g_test = ig.Graph.Erdos_Renyi(n=15, p=0.3)  # Smaller graph for faster testing
+        clustering = GSBM(g_test, K=3, max_iter=20)
+        print(f"GSBM found {len(clustering)} communities")
+        for i in range(min(3, len(clustering))):  # Show first 3
+            print(f"Community {i}: {clustering[i]}")
+    except Exception as e:
+        print(f"GSBM test failed: {e}")
+
+    # Test 7: METIS
+    print("\n7. Testing METIS...")
+    try:
+        g_test = ig.Graph.Erdos_Renyi(n=20, p=0.2)
+        clustering = METIS(g_test, K=4, objective='cut')
+        print(f"METIS found {len(clustering)} communities")
+        community_sizes = [len(clustering[i]) for i in range(len(clustering))]
+        print(f"Community sizes: {community_sizes} (should be roughly balanced)")
+        for i in range(min(3, len(clustering))):  # Show first 3
+            print(f"Community {i}: {clustering[i]}")
+    except Exception as e:
+        print(f"METIS test failed: {e}")
+
+    # Test 8: Integration functions (will be tested after function definitions)
+    print("\n8. Testing integration functions...")
     print("Integration functions will be tested after all definitions are loaded.")
     test_comprehensive_methods()
     

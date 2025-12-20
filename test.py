@@ -11,7 +11,7 @@ from networks.dismantle import SACPolicy
 @dataclass
 class Args:
     device: str='cuda:0'
-    directory: str = 'graphs/real'
+    directory: str = 'graphs/test'
     ckpt_pth: str='saved/mind.ckpt'
     batch_size:int = 4
 

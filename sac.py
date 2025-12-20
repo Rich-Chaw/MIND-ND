@@ -62,6 +62,9 @@ class Args:
     """number of message passings"""
     normalize: bool=True
     """apply instance normalization"""
+    
+    train_dir: str = 'graphs/train/100_200_ER_LPA_COPY_10000'
+    valid_dir: str = 'graphs/valid'
 
 
 
@@ -87,14 +90,14 @@ if __name__ == "__main__":
     print(f'Device is {device}. Seed set to {args.seed}')
 
     env = DismantleEnv(
-        data_dir='graphs/train', 
+        data_dir=args.train_dir, 
         batch_size=args.num_envs, 
         is_val=False, 
         seed=args.seed,
         remove_scc=False
     )
     env_val = DismantleEnv(
-        data_dir='graphs/validation', 
+        data_dir=args.valid_dir, 
         batch_size=args.num_envs, 
         is_val=True, 
         seed=args.seed

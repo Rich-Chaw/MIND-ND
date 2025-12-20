@@ -67,20 +67,24 @@ class MIND(nn.Module):
 
     def forward(self, g: Batch):
         '''
-        return x_profile (N-B,2KF)
+        return x_profile (N,2KF)
         '''
-        # (N,KF)
+        # (N+B,KF)
         x_profile = torch.empty(g.total_nodes, self.num_features*self.num_mps, device=self.x_init.device)
-        # (N,F)
+        # (N+B,F)
         x_k = self.x_init.expand(g.total_nodes, -1)
         for k, conv in enumerate(self.convs):
             x_k = conv(x_k, g.edge_index)
             x_profile[:, k*self.num_features : (k+1)*self.num_features] = x_k
             x_k = torch.relu(x_k)
         
-        x_profile = self.graph_norm(x_profile, g.batch)
+        x_profile = self.graph_norm(x_profile, g.batch) # (N+B,KF)
+        # x_profile = torch.cat([
+        #     x_profile[g.non_omni_mask],
+        #     x_profile[g.omni_ids][g.batch_non_omni]
+        # ], dim=1)
         x_profile = torch.cat([
             x_profile[g.non_omni_mask],
             x_profile[g.omni_ids[g.batch_non_omni]]
-        ], dim=1)
+        ], dim=1)   #(N,2KF) concat(node_embedding, omni_node_embedding)
         return x_profile

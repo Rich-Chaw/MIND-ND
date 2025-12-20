@@ -7,9 +7,7 @@ from copy import deepcopy
 from scipy.integrate import simpson
 from .graph_data import Batch, ig_to_data
 
-#TODO:inplement step_ratio
-
-def validate(env, policy, save_res=None, step_ratio=None,log_removals=False):
+def validate(env, policy, save_res=None,log_removals=False):
     try:
         device = next(policy.parameters()).device
     except:
