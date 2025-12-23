@@ -104,7 +104,7 @@ def validate_one_graph(graph, policy, save_res=None, step_ratio=None, log_remova
     
     policy.eval()
 
-    gcc_eps = []  # LCC size at each step
+    gcc_eps = []  # LCC size at each step (matches environment - no initial state)
     removals = []  # Removed node IDs (original)
     
     # Calculate step size
@@ -134,6 +134,23 @@ def validate_one_graph(graph, policy, save_res=None, step_ratio=None, log_remova
                 original_id = g.vs[idx]["i_init"]
                 removals.append(original_id)
                 g.delete_vertices(idx)
+
+                # Prune small connected components (matches env behavior)
+                def prune_scc(g):
+                    if g.vcount() > 0:
+                        cc = g.connected_components()
+                        cc_sizes = np.array(cc.sizes())
+                        membership = np.array(cc.membership)
+                        gcc_idx = int(cc_sizes.argmax())
+                        threshold = 0.1 * n_init
+                        # Remove nodes in small components (< 10% of original size)
+                        delete_mask = (cc_sizes[membership] < threshold) & (membership != gcc_idx)
+                        delete_idx = np.flatnonzero(delete_mask)
+                        if delete_idx.size:
+                            g.delete_vertices(delete_idx)
+                    return g
+                prune_scc(g)
+
                 # Check termination condition
                 lcc_size = g.connected_components().giant().vcount() / n_init
                 gcc_eps.append(lcc_size)

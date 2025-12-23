@@ -12,7 +12,7 @@ class Args:
     device: str='cuda:0'
     directory: str = 'graphs/test'
     ckpt_pth: str='saved/mind.ckpt'
-    step_ratio: float = 0.0025
+    step_ratio: float = 0
     """step ratio for batch node removal (e.g., 0.0025 means remove 0.25% of nodes per iteration)"""
     log_removals: bool = False
     """whether to log the removal sequence"""
@@ -30,7 +30,7 @@ sac.load_state_dict(torch.load(args.ckpt_pth)['policy_state_dict'])
 
 # Load graph
 name = 'test_single'
-g = load_g(os.path.join(args.directory, 'simple_1.pkl'), name=f'single_1')
+g = load_g(os.path.join(args.directory, 'maayan-figeys.pkl'), name=f'maayan-figeys')
 
 print(f"Testing on graph: {g['name']}")
 print(f"Initial nodes: {g.vcount()}, Initial edges: {g.ecount()}")
@@ -44,7 +44,7 @@ if args.log_removals:
         step_ratio=args.step_ratio,
         log_removals=True
     )
-    print(f"\nRemoval sequence (first 20): {removals[:20]}")
+    print(f"\nRemoval sequence : {removals}")
     print(f"Total nodes removed: {len(removals)}")
 else:
     auc, robustness, lcc_curve = validate_one_graph(

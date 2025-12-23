@@ -6,6 +6,7 @@ from copy import deepcopy
 from typing import Callable, Dict
 import os
 import time
+import gc
 
 def ensure_static_id(graph):
     """Ensure graph has static_id attribute"""
@@ -22,9 +23,12 @@ def get_lcc_size(graph):
 def spectral_dismantling(G, max_steps=None):
     temp_G = G.copy()
     ensure_static_id(temp_G)
-    removed_nodes = []
-    
-    while True:
+    removals = []
+    if max_steps == None:
+        max_steps = temp_G.vcount()
+    else:
+        max_steps = min(temp_G.vcount(), max_steps)
+    for _ in range(max_steps):
         if temp_G.vcount() <= 2 or temp_G.ecount() == 0: 
             break
         
@@ -40,17 +44,125 @@ def spectral_dismantling(G, max_steps=None):
         
         # Map back to original vertex name/index
         original_idx = temp_G.vs[idx_to_remove]['static_id']
-        removed_nodes.append(original_idx)
+        removals.append(original_idx)
         temp_G.delete_vertices(idx_to_remove)
         
-    return removed_nodes
+        # Explicit memory cleanup
+        del L, vals, vecs, fiedler_vec
+        
+        # Force garbage collection every 10 iterations to prevent accumulation
+        if len(removals) % 10 == 0:
+            gc.collect()
+        
+    return removals
+
+
+def spectral_dismantling_advance(G, max_steps=None):
+    """
+    Improved spectral dismantling following GND approach
+    Uses power iteration and spectral clustering
+    much slower but more stable and performs better than spectral_dismantling
+    """
+    import gc
+    temp_G = G.copy()
+    ensure_static_id(temp_G)
+    removals = []
+    
+    if max_steps is not None:
+        max_steps = min(temp_G.vcount(), max_steps)
+    
+    while True:
+        if temp_G.vcount() <= 2 or temp_G.ecount() == 0: 
+            break
+        
+        # Check max_steps limit
+        if max_steps is not None and len(removals) >= max_steps:
+            break
+        
+        # Convert to adjacency matrix
+        adj_matrix = np.array(temp_G.get_adjacency().data)
+        n = adj_matrix.shape[0]
+        
+        if n <= 2:
+            break
+        
+        # Power iteration for Fiedler vector (more stable than eigsh for small matrices)
+        x = np.random.uniform(-1, 1, n)
+        
+        # Create Laplacian matrix L = D - A
+        degrees = np.sum(adj_matrix, axis=1)
+        L = np.diag(degrees) - adj_matrix
+        
+        # Power iteration to find smallest non-zero eigenvalue's eigenvector
+        for _ in range(50):  # More iterations for stability
+            # Shift to avoid zero eigenvalue: (L + I)^-1
+            try:
+                L_shifted = L + np.eye(n)
+                x_new = np.linalg.solve(L_shifted, x)
+                # Orthogonalize against constant vector
+                x_new = x_new - np.mean(x_new)
+                norm = np.linalg.norm(x_new)
+                if norm > 1e-10:
+                    x = x_new / norm
+                else:
+                    break
+            except np.linalg.LinAlgError:
+                # Fallback to simple degree-based removal
+                idx_to_remove = np.argmax(temp_G.degree())
+                removals.append(temp_G.vs[idx_to_remove]['static_id'])
+                temp_G.delete_vertices(idx_to_remove)
+                break
+        else:
+            # Use Fiedler vector to partition and find cut
+            # Find edges crossing the partition (positive vs negative values)
+            crossing_edges = []
+            for edge in temp_G.es:
+                u, v = edge.tuple
+                if x[u] * x[v] < 0:  # Different signs
+                    crossing_edges.append((u, v))
+            
+            if len(crossing_edges) == 0:
+                # No clear partition, remove node closest to zero
+                idx_to_remove = np.argmin(np.abs(x))
+            else:
+                # Remove node that appears in most crossing edges (simple heuristic)
+                node_counts = {}
+                for u, v in crossing_edges:
+                    node_counts[u] = node_counts.get(u, 0) + 1
+                    node_counts[v] = node_counts.get(v, 0) + 1
+                
+                if node_counts:
+                    idx_to_remove = max(node_counts.keys(), key=lambda k: node_counts[k])
+                else:
+                    idx_to_remove = np.argmax(temp_G.degree())
+            
+            removals.append(temp_G.vs[idx_to_remove]['static_id'])
+            temp_G.delete_vertices(idx_to_remove)
+        
+        # Explicit memory cleanup for large matrices
+        del adj_matrix, degrees, L, x
+        if 'L_shifted' in locals():
+            del L_shifted
+        if 'x_new' in locals():
+            del x_new
+        
+        # Force garbage collection every 5 iterations (more frequent due to larger matrices)
+        if len(removals) % 5 == 0:
+            gc.collect()
+        
+    return removals
 
 def core_hd(G, max_steps=None):
     temp_G = G.copy()
     ensure_static_id(temp_G)
-    removed_nodes = []
+    removals = []
     
-    while True:
+    if max_steps == None:
+        max_steps = temp_G.vcount()
+    else:
+        max_steps = min(temp_G.vcount(), max_steps)
+    
+    for _ in range(max_steps):
         if temp_G.vcount() <= 2 or temp_G.ecount() == 0: 
             break
         # 1. Calculate Coreness (k-shell decomposition)
@@ -68,30 +180,103 @@ def core_hd(G, max_steps=None):
             # Fallback to standard high-degree if no 2-core remains
             idx_to_remove = np.argmax(temp_G.degree())
             
-        removed_nodes.append(temp_G.vs[idx_to_remove]['static_id'])
+        removals.append(temp_G.vs[idx_to_remove]['static_id'])
         temp_G.delete_vertices(idx_to_remove)
         
-    return removed_nodes
+    return removals
 
 def adaptive_degree(G, max_steps=None):
     temp_G = G.copy()
     ensure_static_id(temp_G)
-    removed_nodes = []
+    removals = []
     
-    while True:
+    if max_steps == None:
+        max_steps = temp_G.vcount()
+    else:
+        max_steps = min(temp_G.vcount(), max_steps)
+    for _ in range(max_steps):
         if temp_G.vcount() <= 2 or temp_G.ecount() == 0: 
             break
         
         idx_to_remove = np.argmax(temp_G.degree())
-        removed_nodes.append(temp_G.vs[idx_to_remove]['static_id'])
+        removals.append(temp_G.vs[idx_to_remove]['static_id'])
         temp_G.delete_vertices(idx_to_remove)
-    return removed_nodes
+    return removals
 
-# def adaptive_betweenness(G,max_steps=None):
+def adaptive_betweenness(G, max_steps=None):
+    """Adaptive betweenness centrality dismantling"""
+    temp_G = G.copy()
+    ensure_static_id(temp_G)
+    removals = []
+    
+    if max_steps == None:
+        max_steps = temp_G.vcount()
+    else:
+        max_steps = min(temp_G.vcount(), max_steps)
+    for _ in range(max_steps):
+        if temp_G.vcount() <= 2 or temp_G.ecount() == 0: 
+            break
+        
+        betweenness = temp_G.betweenness()
+        idx_to_remove = np.argmax(betweenness)
+        removals.append(temp_G.vs[idx_to_remove]['static_id'])
+        temp_G.delete_vertices(idx_to_remove)
+    return removals
 
-# def adaptive_pagerank(G,max_steps=None):
+def adaptive_pagerank(G, max_steps=None):
+    """Adaptive PageRank dismantling"""
+    temp_G = G.copy()
+    ensure_static_id(temp_G)
+    removals = []
+    
+    if max_steps == None:
+        max_steps = temp_G.vcount()
+    else:
+        max_steps = min(temp_G.vcount(), max_steps)
+    for _ in range(max_steps):
+        if temp_G.vcount() <= 2 or temp_G.ecount() == 0: 
+            break
+        
+        pagerank = temp_G.pagerank()
+        idx_to_remove = np.argmax(pagerank)
+        removals.append(temp_G.vs[idx_to_remove]['static_id'])
+        temp_G.delete_vertices(idx_to_remove)
+    return removals
 
-# def adaptive_ci(G,max_steps=None):
+def adaptive_ci(G, max_steps=None):
+    """Adaptive Collective Influence dismantling"""
+    temp_G = G.copy()
+    ensure_static_id(temp_G)
+    removals = []
+    
+    if max_steps == None:
+        max_steps = temp_G.vcount()
+    else:
+        max_steps = min(temp_G.vcount(), max_steps)
+    
+    for _ in range(max_steps):
+        if temp_G.vcount() <= 2 or temp_G.ecount() == 0: 
+            break
+        
+        # Collective Influence with radius 2
+        ci_scores = []
+        for v in temp_G.vs:
+            # CI(v) = (k_v - 1) * sum_{u in ball(v,2)} (k_u - 1)
+            neighbors_1 = set(temp_G.neighbors(v.index))
+            neighbors_2 = set()
+            for n1 in neighbors_1:
+                neighbors_2.update(temp_G.neighbors(n1))
+            
+            ball_2 = neighbors_1.union(neighbors_2) - {v.index}
+            
+            k_v = len(neighbors_1)
+            ci_score = (k_v - 1) * sum(len(temp_G.neighbors(u)) - 1 for u in ball_2)
+            ci_scores.append(ci_score)
+        
+        idx_to_remove = np.argmax(ci_scores)
+        removals.append(temp_G.vs[idx_to_remove]['static_id'])
+        temp_G.delete_vertices(idx_to_remove)
+    return removals
 
 
 def random_dismantling(G, max_steps=None):
@@ -102,6 +287,10 @@ def random_dismantling(G, max_steps=None):
     # Get all node IDs and shuffle them
     node_ids = [v['static_id'] for v in temp_G.vs]
     np.random.shuffle(node_ids)
+    
+    # Return only max_steps nodes if specified
+    if max_steps is not None:
+        return node_ids[:max_steps]
     return node_ids
 
 def bpd_dismantling(G, max_steps=None):
@@ -111,12 +300,17 @@ def bpd_dismantling(G, max_steps=None):
     """
     temp_G = G.copy()
     ensure_static_id(temp_G)
-    removed_nodes = []
+    removals = []
+    
+    if max_steps == None:
+        max_steps = temp_G.vcount()
+    else:
+        max_steps = min(temp_G.vcount(), max_steps)
     
     # Parameters for the BP algorithm
     x = 10.0  # Sensitivity parameter (resembles inverse temperature)
     
-    while True:
+    for _ in range(max_steps):
         if temp_G.vcount() <= 2 or temp_G.ecount() == 0: 
             break
         
@@ -153,10 +347,61 @@ def bpd_dismantling(G, max_steps=None):
             
         # Remove the node with the highest marginal probability
         node_to_del_idx = np.argmax(marginals)
-        removed_nodes.append(temp_G.vs[node_to_del_idx]['static_id'])
+        removals.append(temp_G.vs[node_to_del_idx]['static_id'])
         temp_G.delete_vertices(node_to_del_idx)
         
-    return removed_nodes
+    return removals
+
+def evaluate_sol(graph, removals):
+    '''
+    Evaluate a dismantling solution by computing AUC and robustness
+    
+    Args:
+        graph: igraph.Graph object
+        removals: list of node indices in removal order
+    
+    Returns:
+        auc: Area under the curve (using Simpson's rule)
+        robustness: Robustness metric (sum of reversed gcc_eps / n_init)
+    '''
+    from scipy.integrate import simpson
+    
+    temp_G = graph.copy()
+    ensure_static_id(temp_G)
+    n_init = temp_G.vcount()
+    
+    # Track LCC size at each step (normalized) - start with initial state
+    gcc_eps = []
+    
+    # Initial LCC size (should be 1.0 for connected graphs)
+    # initial_lcc_size = get_lcc_size(temp_G) / n_init
+    # gcc_eps.append(initial_lcc_size)
+    
+    # Remove nodes one by one and track LCC after each removal
+    for node_id in removals:
+        if temp_G.vcount() == 0:
+            break
+        
+        # Find the vertex with matching static_id
+        try:
+            vertex_idx = [i for i, v in enumerate(temp_G.vs) if v['static_id'] == node_id][0]
+            temp_G.delete_vertices(vertex_idx)
+            
+            # Calculate normalized LCC size after removal
+            if temp_G.vcount() > 0:
+                lcc_size = get_lcc_size(temp_G) / n_init
+            else:
+                lcc_size = 0.0
+            gcc_eps.append(lcc_size)
+        except (IndexError, KeyError):
+            # Node already removed or doesn't exist
+            continue
+    
+    # Compute metrics following Logger class implementation
+    auc = simpson(gcc_eps, dx=1)
+    robustness = sum(gcc_eps[::-1][:-1]) / n_init
+    
+    return auc, robustness
 
 def create_dismantling_comparison_complete(graph, methods, output_dir="dismantling_analysis"):
     """
@@ -199,12 +444,11 @@ def baseline_dismantling(graph, methods,max_steps=None,visualize=False):
     plt.figure(figsize=(6,4))
     for name, func in methods.items():
         # Get the sequence of nodes to remove
-        print(f"  Running {name}...")
-        t1 = time.time()
         removals = func(graph,max_steps)
-        t2 = time.time()
-        print(f"method {name} dismantling time: ",t2-t1)
-        
+
+        auc, r = evaluate_sol(graph,removals)
+        print(f"method {name}: AUC={auc}, Robustness={r}")
+
         methods_results[name] = removals
 
     if visualize:
@@ -213,14 +457,54 @@ def baseline_dismantling(graph, methods,max_steps=None,visualize=False):
 
     return methods_results
 
+# Import GND methods
+try:
+    from gnd_python import gnd_spectral_dismantling, gnd_weighted_dismantling
+    from gnd_reinsertion import gnd_with_reinsertion
+    GND_AVAILABLE = True
+except ImportError:
+    print("GND methods not available - gnd_python.py or gnd_reinsertion.py not found")
+    GND_AVAILABLE = False
+
+def gnd_dismantling_wrapper(G, max_steps=None):
+    """Wrapper for GND weighted dismantling"""
+    if not GND_AVAILABLE:
+        return adaptive_degree(G, max_steps)
+    return gnd_weighted_dismantling(G, max_steps)
+
+def gnd_spectral_wrapper(G, max_steps=None):
+    """Wrapper for GND spectral dismantling"""
+    if not GND_AVAILABLE:
+        return spectral_dismantling(G, max_steps)
+    return gnd_spectral_dismantling(G, max_steps)
+
+def gnd_with_reinsertion_wrapper(G, max_steps=None):
+    """Wrapper for GND with reinsertion"""
+    if not GND_AVAILABLE:
+        return adaptive_degree(G, max_steps)
+    return gnd_with_reinsertion(G, target_size_ratio=0.01, use_weighted=True, 
+                               reinsertion_threshold=max(100, G.vcount()//10))
+
 # Usage
 METHODS = {
-    "Random":random_dismantling,
+    "Random": random_dismantling,
     "CoreHD": core_hd,
-    "Spectral":spectral_dismantling,
-    "Adaptive Degree": adaptive_degree,
-    "BPD": bpd_dismantling
+    "Spectral": spectral_dismantling,
+    "SpectralA":spectral_dismantling_advance,
+    "Degree": adaptive_degree,
+    "BPD": bpd_dismantling,
+    "Betweenness": adaptive_betweenness,
+    "PageRank": adaptive_pagerank,
+    "CI": adaptive_ci,
 }
+
+# Add GND methods if available
+if GND_AVAILABLE:
+    METHODS.update({
+        "GND Weighted": gnd_dismantling_wrapper,
+        "GND Spectral": gnd_spectral_wrapper,
+        "GNDR": gnd_with_reinsertion_wrapper,
+    })
 
 
 if __name__ == "__main__":

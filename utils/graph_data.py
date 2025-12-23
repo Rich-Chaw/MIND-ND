@@ -17,7 +17,7 @@ class Batch:
         '''
         graph_array List[Graph]
         N: sum of nodes num in graph array N=N_1 + N_2 + N_3 ....., Note N_i is the node num before add omni node
-        E: sum of edges num in graph array E=E_1 + E_2 + E_3 ....., Note E_i is the edge num after add omni node
+        E: sum of edges num in graph array E=E_1 + E_2 + E_3 ....., Note E_i is the edge num before add omni node
         '''
         self.device = device
         self.batch_size = len(graph_array) # B
@@ -34,7 +34,7 @@ class Batch:
 
         batch = np.repeat(np.arange(self.batch_size), num_nodes_b, axis=0) #(N+B)     data:[0,0,..,1,1,,...,B-1,B-1,...]
 
-        edge_index = np.concatenate([g.edge_index+s for s, g in zip(start_ids, graph_array)], axis=1)   #(2,E)
+        edge_index = np.concatenate([g.edge_index+s for s, g in zip(start_ids, graph_array)], axis=1)   #(2,E+N1+N2+..)
 
         self.num_nodes_b = torch.tensor(num_nodes_b, dtype=torch.long, device=self.device)
         self.total_nodes = self.num_nodes_b.sum() # N+B

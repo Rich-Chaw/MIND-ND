@@ -27,13 +27,13 @@ class GraphPool:
             is_val: bool = False, 
             render: bool = False,
         ):
-        self.graph_data = graph_data
+        self.graph_data = graph_data    # all graphs
         self.size = size
         self.rng = rng
         self.is_val = is_val
         self.render = render
 
-        self.graphs: List[ig.Graph] = []
+        self.graphs: List[ig.Graph] = []    # active graphs
 
         n_slots = min(self.size, len(self.graph_data))
         for i in range(n_slots):
@@ -86,6 +86,7 @@ class GraphPool:
 
     def prune_scc(self):
         for i, g in enumerate(self.graphs):
+            if g.vcount() == 0: continue
             cc = g.connected_components()
             cc_sizes = np.array(cc.sizes()); membership = np.array(cc.membership)
             gcc_idx = int(cc_sizes.argmax())

@@ -37,6 +37,8 @@ else:
     g_list.extend([load_g(os.path.join(args.directory, p), f'custom_{os.path.splitext(os.path.basename(p))[0]}') 
                     for p in sorted(os.listdir(args.directory))])
 env = DismantleEnv(graph_data=g_list, batch_size=args.batch_size, is_val=True)
-validate(env, sac, save_res=name)
+# validate(env, sac, save_res=name)
+_,_,_, removals = validate(env, sac, save_res=name, log_removals=True)
+print(removals)
 
 # nohup python -u test.py --device cuda:0 --ckpt_pth saved/mind.ckpt --directory graphs/real > test.out 2>&1 &

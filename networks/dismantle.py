@@ -51,7 +51,7 @@ class SACPolicy(nn.Module):
         '''
         return 
             act: action for each graph [B]
-            log_probs: [N]
+            log_probs: [N] without omni code
         '''
         logits = self(g)
         log_probs = scatter_log_softmax(logits, g.batch_non_omni, dim_size=g.batch_size)

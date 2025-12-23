@@ -6,6 +6,11 @@ import igraph as ig
 from copy import deepcopy
 import os
 
+def ensure_static_id(graph):
+    """Ensure graph has static_id attribute"""
+    if 'static_id' not in graph.vs.attributes():
+        graph.vs['static_id'] = list(range(graph.vcount()))
+
 def get_lcc_size(graph):
     """Get the size of the largest connected component"""
     if graph.vcount() == 0:
@@ -15,6 +20,7 @@ def get_lcc_size(graph):
 
 def get_curve_list(graph,removals,step_ratio=None):
     graph = graph.copy()
+    ensure_static_id(graph)
     n_init = graph.vcount()
     if step_ratio:
         step_size = max(1,int(n_init*step_ratio))
@@ -163,13 +169,14 @@ def visualize_multiple_curve(graph, methods_results,step_ratio = None, save_path
     
     plt.figure(figsize=(12, 8))
     n_init = graph.vcount()
-    colors = ['blue', 'green', 'orange', 'purple']
+    # colors = ['blue', 'green', 'orange', 'purple']
+    colors = plt.cm.tab20(np.linspace(0, 2, 30))
     
     for i, (method_name, removals) in enumerate(methods_results.items()):
         lcc_sizes,removed_sizes = get_curve_list(graph,removals,step_ratio)
         x = np.array(removed_sizes) / n_init
         y = np.array(lcc_sizes) / n_init
-        plt.plot(x, y, color=colors[i % len(colors)], linewidth=2, 
+        plt.plot(x, y, color=colors[i], linewidth=2, 
                 marker='o', markersize=3, label=method_name, alpha=0.8)
     
     plt.xlabel('Fraction of Nodes Removed', fontsize=12)
