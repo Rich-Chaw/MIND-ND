@@ -15,8 +15,9 @@ from torch.utils.tensorboard import SummaryWriter
 
 from env import DismantleEnv
 from networks.dismantle import load_dismantler
-from utils import ReplayBuffer, Batch, validate, ig_to_data
+from utils import ReplayBuffer, FinetuneBuffer, Batch, validate, ig_to_data
 import torch.nn.functional as F
+import gc
 
 
 
@@ -40,7 +41,7 @@ class Args:
     """validation frequency, default 1000"""
     save_frequency: int=200
     """save frequency, default 1000"""
-    learning_starts: int= 2000
+    learning_starts: int= 1000
     """timestep to start learning, default 2000"""
     learning_rate: float=3e-5
     """learning rate for the policy and the Q networks, original 3e-4"""
@@ -52,7 +53,7 @@ class Args:
     """Discount factor"""
     num_updates: int=12
     """number of network updates at each step, original 16"""
-    target_frequency: int=200
+    target_frequency: int=100
     """the frequency for updating the target networks, default 200"""
 
     ckpt_pth: Optional[str]='saved/mind.ckpt'
@@ -75,12 +76,22 @@ class Args:
     teacher_method: str = 'spectral'
     """Teacher method: 'spectral', 'betweenness'"""
     teacher_distill: bool = True
-    """Use teacher method distillation"""
-    teacher_coeff: float = 0.8
-    """Coefficient for teacher method distillation loss (λ2)"""
-    teacher_temperature: float = 2.0
-    """Temperature for soft probability generation from teacher"""
+    """Add teacher experience to buffer"""
     
+    # Warmup settings
+    warmup: bool = False
+    """Enable warmup phase with teacher supervision"""
+    warmup_steps: int = 1000
+    """Number of warmup steps for teacher supervision"""
+    warmup_lr: float = 1e-4
+    """Learning rate for warmup phase"""
+    warmup_soft: bool = False
+    """Use soft teacher probabilities in warmup phase"""
+    warmup_top_k: int = 5
+    """Number of top-k actions to consider for soft teacher"""
+    warmup_temperature: float = 1.0
+    """Temperature for soft teacher distribution"""
+ 
     num_features: int = 16
     """number of initial node features"""
     num_heads: int=4
@@ -98,120 +109,93 @@ class Args:
     ft_train_dir: str = 'graphs/train/100_200_SBM_2000'
     ft_valid_dir: str = 'graphs/valid'
 
-
-def to_soft_probs(graph, removals, current_step, temperature=2.0):
-    """Convert spectral removal sequence to soft probability distribution"""
-    n_nodes = graph.vcount()
-    probs = np.full(n_nodes, 0.01)  # Small background probability
-    
-    # Get next few nodes in sequence
-    remaining_nodes = removals[current_step:]
-    
-    if len(remaining_nodes) > 0:
-        # Primary choice (next node)
-        next_node = remaining_nodes[0]
-        probs[next_node] = 0.6
-        
-        # Secondary choices (next 2-3 nodes)
-        for i, node in enumerate(remaining_nodes[1:4]):  # Next 3 nodes
-            if i < len(remaining_nodes) - 1:
-                probs[node] = 0.2 / (i + 1)  # Decreasing probability
-    
-    # Apply temperature scaling
-    probs = probs ** (1.0 / temperature)
-    
-    # Normalize to sum to 1
-    probs = probs / probs.sum()
-    return probs
-
-
-def batch_to_igraphs(batch):
-    """Convert a Batch object back to list of igraph objects"""
-    graphs = []
-    
-    for i in range(batch.batch_size):
-        # Get nodes and edges for this graph
-        graph_mask = (batch.batch == i)
-        # Remove the omni-node (last node in each graph)
-        graph_nodes = graph_mask.sum().item() - 1
-
-        # Get edges for this graph (excluding omni-node connections)
-        graph_edges = []
-        edge_mask = graph_mask[batch.edge_index[0]] & graph_mask[batch.edge_index[1]]
-        
-        if edge_mask.any():
-            graph_edge_indices = batch.edge_index[:, edge_mask]
-            
-            # Convert global indices to local indices for this graph
-            node_offset = (batch.batch == i).nonzero()[0].item()
-            local_edges = graph_edge_indices - node_offset
-            
-            # Filter out omni-node connections (edges involving the last node)
-            valid_edge_mask = (local_edges[0] < graph_nodes) & (local_edges[1] < graph_nodes)
-            if valid_edge_mask.any():
-                valid_edges = local_edges[:, valid_edge_mask]
-                graph_edges = valid_edges.t().cpu().numpy().tolist()
-        
-        # Create igraph
-        if graph_nodes > 0:
-            g = ig.Graph(n=graph_nodes, edges=graph_edges, directed=False)
-        else:
-            g = ig.Graph(n=1, edges=[], directed=False)  # Minimum graph
-        
-        graphs.append(g)
-    
-    return graphs
-
-def compute_teacher_actions_on_demand(batch, teacher_method='spectral', temperature=2.0, device='cuda'):
-    """
-    Returns teacher log probabilities in the same format as student policy:
-    - Flat tensor [total_non_omni_nodes] matching logp_b from get_action
-    - Uses batch.batch_non_omni for indexing, just like student
-    """
-    from baseline import spectral_dismantling, spectral_dismantling_advance, adaptive_betweenness
-    
-    # Convert batch to igraphs
-    batch_graphs = batch_to_igraphs(batch)
-    
-    # Initialize teacher logprobs for all non-omni nodes
-    num_non_omni_nodes = batch.non_omni_mask.sum().item()
-    teacher_logprobs = torch.full((num_non_omni_nodes,), -float('inf'),dtype=torch.float64, device=device)
-    
-    for i, graph in enumerate(batch_graphs):
+def teacher_wrapper(graph, teacher_method='spectral', max_steps=None):
+    from baseline import spectral_dismantling, spectral_dismantling_advance, adaptive_betweenness, random_dismantling
+    if teacher_method == 'spectral':
         try:
-            if graph.vcount() <= 2 or graph.ecount() == 0:
-                continue
-            
-            # Try spectral dismantling with max_steps=5
-            if teacher_method in ['spectral']:
-                try:
-                    removal_sequence = spectral_dismantling(graph, max_steps=5)
-                except Exception as e:
-                    removal_sequence = adaptive_betweenness(graph, max_steps=5)
-            elif teacher_method == 'spectral_advanced':
-                removal_sequence = spectral_dismantling_advance(graph, max_steps=5)
-            elif teacher_method == 'betweenness':
-                removal_sequence = adaptive_betweenness(graph, max_steps=5)
-            else:
-                raise ValueError(f"Unknown teacher method: {teacher_method}")
-                
-            # Convert to soft probabilities
-            soft_probs = to_soft_probs(graph, removal_sequence, 0, temperature)
-            
-            # Get indices for this graph's non-omni nodes - use explicit indexing
-            node_mask = (batch.batch_non_omni == i)
-            teacher_probs_tensor = torch.tensor(soft_probs, device=device)
-            teacher_logprobs[node_mask] = torch.log(teacher_probs_tensor + 1e-8)
+            removals = spectral_dismantling(graph, max_steps=max_steps)
+        except Exception:
+            removals = adaptive_betweenness(graph, max_steps=max_steps)
+    elif teacher_method == 'spectral_advanced':
+        removals = spectral_dismantling_advance(graph, max_steps=max_steps)
+    elif teacher_method == 'betweenness':
+        removals = adaptive_betweenness(graph, max_steps=max_steps)
+    else:
+        print(f"Unknown teacher method: {teacher_method}, using random")
+        removals = random_dismantling(graph, max_steps=max_steps)
+    return removals
 
-        except Exception as e:
-            continue
+def teacher_step(obs_list, teacher_method='spectral'):
+    """
+    Compute teacher actions for a list of graph observations
+    """
+    act_arr = np.zeros(len(obs_list), dtype=np.int64)
+    obs_next_list = []
+    rew_arr = np.zeros(len(obs_list), dtype=np.float32)
+    done_arr = np.zeros(len(obs_list), dtype=bool)
     
-    import gc
-    del batch_graphs
-    gc.collect()
-    
-    return teacher_logprobs
+    for i, graph in enumerate(obs_list):
+        if graph.vcount() <= 2 or graph.ecount() == 0:
+            # Handle empty or very small graphs
+            act_arr[i] = 0 if graph.vcount() > 0 else 0
+            obs_next = graph.copy()
+            if graph.vcount() > 0:
+                obs_next.delete_vertices(0)
+        else:
+            # Generate teacher action using specified method
+            removals = teacher_wrapper(graph.copy(), teacher_method, max_steps=1)
+            teacher_action = removals[0]
+            act_arr[i] = teacher_action
+            obs_next = graph.copy()
+            obs_next.delete_vertices(teacher_action)
 
+        # Compute reward and done flag (following env.step logic)
+        if obs_next.vcount() == 0:
+            lcc_size = 0.0
+            done_flag = True
+        else:
+            components = obs_next.connected_components()
+            lcc_size = max(components.sizes()) if len(components.sizes()) > 0 else 0
+            lcc_ratio = lcc_size / max(graph['n_init'], 1)
+            done_flag = (lcc_ratio < 0.1 or obs_next.ecount() == 0)
+            rew_arr[i] = -lcc_size / max(graph['n_init'], 1)  # Negative LCC ratio as reward
+            done_arr[i] = done_flag
+            obs_next_list.append(obs_next)
+            
+    return act_arr, obs_next_list, rew_arr, done_arr
+
+
+def get_soft_teacher_distribution_from_removals(graph, removals, temperature=1.0):
+    """
+    Generate soft teacher distribution based on pre-computed removals
+    """
+    if graph.vcount() <= 2:
+        probs = np.ones(graph.vcount()) / graph.vcount()
+        return probs
+    try:
+        # Initialize uniform distribution
+        probs = np.zeros(graph.vcount())
+        
+        # Assign probabilities based on teacher ranking
+        for rank, static_id in enumerate(removals):
+            # Find current index of this node
+            for j, v in enumerate(graph.vs):
+                if v['static_id'] == static_id:
+                    # Exponential decay based on rank (rank 0 = highest priority)
+                    probs[j] = np.exp(-rank / temperature)
+                    break
+        
+        # Normalize to probabilities
+        if probs.sum() > 0:
+            probs = probs / probs.sum()
+        else:
+            # Fallback to uniform if no valid actions found
+            probs = np.ones(graph.vcount()) / graph.vcount()
+            
+    except Exception as e:
+        print(f"Soft teacher distribution failed: {e}")
+        probs = np.ones(graph.vcount()) / graph.vcount()
+    return probs
 
 if __name__ == "__main__":
     args = tyro.cli(Args)
@@ -285,7 +269,7 @@ if __name__ == "__main__":
         seed=args.seed
     )
     
-    buffer = ReplayBuffer(args.buffer_size, device)
+    buffer = FinetuneBuffer(args.buffer_size, device)
 
     # Load pretrained network 
     policy, qf1, qf2, qf1_target, qf2_target = load_dismantler(args.num_features, args.num_heads, args.num_mps, device, args.ckpt_pth)
@@ -322,9 +306,7 @@ if __name__ == "__main__":
         
         print(f'Loaded pretrained checkpoint: {args.pretrained_ckpt_pth}')
         print(f'---- pretrain policy network frozen with {sum(p.numel() for p in policy_pretrain.parameters())} parameters')
-        
-        if args.teacher_distill:
-            print(f'---- Teacher method: {args.teacher_method}')
+        print(f'---- Teacher method: {args.teacher_method} (priority-based sampling)')
     
     
     # Setup optimizers with appropriate learning rates
@@ -342,6 +324,113 @@ if __name__ == "__main__":
     auc_buffer = deque(maxlen=20)
     start_time = time.time()
 
+    #### WARMUP PHASE ####
+    if args.warmup:
+        from baseline import ensure_static_id
+        print(f"Starting warmup phase for {args.warmup_steps} steps...")
+  
+        # Pre-compute teacher trajectories for all training graphs
+        teacher_trajectories = []
+        
+        for i, graph in enumerate(env.graph_data[:10]):
+            if i % 100 == 0:
+                print(f"  Processing graph {i}/{len(env.graph_data)}")
+            
+            if graph.vcount() <= 1:
+                continue
+            
+            ensure_static_id(graph)
+            # Get complete teacher solution for trajectory progression
+            removals = teacher_wrapper(graph.copy(), args.teacher_method)
+            trajectory = []
+            temp_graph = graph.copy()
+            
+            for step, removal_static_id in enumerate(removals):
+                vertex_idx =  [i for i, v in enumerate(temp_graph.vs) if v['static_id'] == removal_static_id][0]
+                
+                if args.warmup_soft:
+                    # Generate soft teacher distribution using remaining removals
+                    remaining_removals = removals[step:step+args.warmup_top_k]
+                    soft_probs = get_soft_teacher_distribution_from_removals(
+                        temp_graph, remaining_removals, args.warmup_temperature
+                    )
+                    # Store (state, soft_probs) pair
+                    trajectory.append((temp_graph.copy(), soft_probs))
+                else:
+                    # Store (state, hard_action) pair
+                    trajectory.append((temp_graph.copy(), vertex_idx)) 
+                temp_graph.delete_vertices(vertex_idx)
+            teacher_trajectories.append(trajectory)
+        
+        # Warmup training
+        warmup_optimizer = torch.optim.Adam(policy_params, lr=args.warmup_lr, eps=1e-4)
+        
+        for warmup_step in range(args.warmup_steps):
+            # Sample batch directly from teacher trajectories
+            batch_states = []
+            batch_targets = []
+            for _ in range(args.batch_size):
+                traj_idx = np.random.randint(len(teacher_trajectories))
+                trajectory = teacher_trajectories[traj_idx]
+                if len(trajectory) == 0:
+                    continue
+                # Randomly select a step from this trajectory
+                step_idx = np.random.randint(len(trajectory))
+                state, target = trajectory[step_idx]
+                batch_states.append(state)
+                batch_targets.append(target)
+            
+            if len(batch_states) == 0:
+                continue
+                
+            # Convert to batch format
+            obs_b = Batch(device, [ig_to_data(g) for g in batch_states])
+            # Get student policy logits
+            _, student_logp_b = policy.get_action(obs_b)
+            
+            if args.warmup_soft:
+                # Soft teacher supervision with KL divergence
+                batch_soft_probs = np.concatenate([target for target in batch_targets])  # Shape: [N]
+                teacher_prob_b = torch.tensor(batch_soft_probs, device=device, dtype=torch.float32)
+                
+                # KL divergence loss: KL(teacher || student)
+                warmup_loss = F.kl_div(
+                    student_logp_b,  # Already log probabilities
+                    teacher_prob_b, 
+                    reduction='batchmean'
+                )
+            else:
+                # Hard teacher supervision with negative log-likelihood
+                batch_actions = np.array(batch_targets)
+                teacher_acts_batch = torch.tensor(batch_actions, device=device, dtype=torch.long)
+                # Add action offsets for proper indexing
+                teacher_acts_batch += obs_b.act_offsets
+                
+                # Negative log-likelihood loss
+                warmup_loss = -student_logp_b[teacher_acts_batch].mean()
+            
+            # Update student policy
+            warmup_optimizer.zero_grad()
+            warmup_loss.backward()
+            warmup_optimizer.step()
+            
+            if warmup_step % 100 == 0:
+                print(f"Warmup step {warmup_step}/{args.warmup_steps}, Loss: {warmup_loss.item():.4f}")
+                if args.use_tb:
+                    writer.add_scalar("warmup/loss", warmup_loss.item(), warmup_step)
+        
+        # Validate student performance after warmup
+        val_auc_list = validate(env_val, policy)[0]
+        auc_val_avg = sum(val_auc_list)/len(val_auc_list)
+        print(f'After warmup, Avg. Validation AUC is {auc_val_avg:.4f}')
+        if args.use_tb:
+            writer.add_scalar("warmup/val_auc", auc_val_avg, args.warmup_steps)
+        
+        # Clear memory
+        del teacher_trajectories
+        gc.collect()
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+
     #### MAIN LOOP ####
     obs_list, _ = env.reset()
     for global_step in range(args.total_steps): # args.num_envs transitions at each global step
@@ -356,7 +445,14 @@ if __name__ == "__main__":
 
         obs_next_list, rew_arr, done_arr, info_list = env.step(act_arr)
 
-        buffer.add(obs_list, act_arr, obs_next_list, rew_arr, done_arr)
+        buffer.add(obs_list, act_arr, obs_next_list, rew_arr, done_arr, is_teacher=False)
+        
+        # When teacher_distill is active, also generate and add teacher experiences
+        if args.teacher_distill:
+            tc_act_arr, tc_obs_next_list, tc_rew_arr, tc_done_arr = teacher_step(
+                obs_list, teacher_method=args.teacher_method
+            )
+            buffer.add(obs_list, tc_act_arr, tc_obs_next_list, tc_rew_arr, tc_done_arr, is_teacher=True)
 
         obs_next_list, _ = env.reset_async(done_arr)
         
@@ -388,13 +484,17 @@ if __name__ == "__main__":
         if (global_step + 1) % 50 == 0:
             time_relative = str(timedelta(seconds=time.time() - start_time)).split('.')[0]
             auc_avg = sum(auc_buffer)/len(auc_buffer)
-            print(f"[{time_relative} | {num_eps} episodes | {global_step} steps] Avg. AUC = {auc_avg:.3f} (Finetuning)")
+            print(f"[{time_relative} | {num_eps} episodes | {global_step} steps] Avg. AUC = {auc_avg:.3f} (Priority Finetuning)")
             if args.use_tb:
                 writer.add_scalar("train/AUC", auc_avg, global_step)
             
         if global_step > args.learning_starts:
             for _ in range(args.num_updates):
-                obs_b, act_b, obs_next_b, rew_b, done_b = buffer.sample(args.batch_size)
+                # Sample with priority-based sampling
+                obs_b, act_b, obs_next_b, rew_b, done_b = buffer.sample(
+                    args.batch_size, 
+                    use_priority=True
+                )
                 
                 # CRITIC Training
                 with torch.no_grad():
@@ -426,13 +526,9 @@ if __name__ == "__main__":
                     qf2_b = qf2(obs_b)
                 v_b = logp_b.exp()*(args.alpha*logp_b - torch.min(qf1_b, qf2_b))
                 b = obs_b.batch[obs_b.non_omni_mask]
-                rl_loss = scatter_add(v_b, b, dim_size=obs_b.batch_size).mean()
+                policy_loss = scatter_add(v_b, b, dim_size=obs_b.batch_size).mean()
                 
                 if args.distillation:
-                    # Multi-teacher distillation loss
-                    distill_loss = torch.tensor(0.0, device=device)
-                    teacher_distill_loss = torch.tensor(0.0, device=device)
-                    
                     # MIND teacher distillation (prevent forgetting)
                     with torch.no_grad():
                         _, pretrain_logp_b = policy_pretrain.get_action(obs_b)
@@ -446,47 +542,24 @@ if __name__ == "__main__":
                     kl_loss_per_graph = scatter_add(kl_loss_per_node, b, dim_size=obs_b.batch_size)
                     distill_loss = kl_loss_per_graph.mean()
                     
-                    # Teacher method distillation (learn SBM expertise)
-                    if args.teacher_distill and global_step%5 == 0:
-                        try:
-                            teacher_logp_b = compute_teacher_actions_on_demand(obs_b, args.teacher_method, args.teacher_temperature, device)
-                            
-                            # Same KL divergence computation as MIND distillation
-                            teacher_prob_b = teacher_logp_b.exp()
-                            student_prob_b = logp_b.exp()
-                            
-                            # KL divergence per node, then per graph
-                            teacher_kl_per_node = teacher_prob_b * (teacher_logp_b - logp_b)
-                            teacher_kl_per_graph = scatter_add(teacher_kl_per_node, b, dim_size=obs_b.batch_size)
-                            teacher_distill_loss = teacher_kl_per_graph.mean()
-                            
-                        except Exception as e:
-                            if global_step % 1000 == 0:  # Log occasionally to avoid spam
-                                print(f"Teacher distillation failed: {str(e)}")
-                            teacher_distill_loss = torch.tensor(0.0, device=device)
-                    
-                    distill_coeff, teacher_coeff = args.distill_coeff, args.teacher_coeff
-                    # Combined loss
-                    policy_loss = rl_loss + distill_coeff * distill_loss + teacher_coeff * teacher_distill_loss
+                    # Combined loss (no teacher distillation loss - handled by priority sampling)
+                    enhanced_policy_loss = policy_loss + args.distill_coeff * distill_loss
                     
                 else:
                     # For transfer_learning and experience_replay, use standard SAC loss
-                    policy_loss = rl_loss
+                    enhanced_policy_loss = policy_loss
                     distill_loss = torch.tensor(0.0, device=device)
-                    teacher_distill_loss = torch.tensor(0.0, device=device)
                 
-                policy_optimizer.zero_grad(); policy_loss.backward(); policy_optimizer.step()
+                policy_optimizer.zero_grad(); enhanced_policy_loss.backward(); policy_optimizer.step()
                 
                 if args.use_tb and num_updates%args.target_frequency == 0:
                     writer.add_scalar("losses/q1(s,a)", q1_b.mean().item(), global_step)
                     writer.add_scalar("losses/q2(s,a)", q1_b.mean().item(), global_step)
                     writer.add_scalar("losses/q_loss", q_loss.item() / 2.0, global_step)
                     writer.add_scalar("losses/policy_loss", -policy_loss.item(), global_step)
-                    writer.add_scalar("losses/rl_loss", -rl_loss.item(), global_step)
+                    writer.add_scalar("losses/enhanced_policy_loss", -enhanced_policy_loss.item(), global_step)
                     if args.distillation:
-                        writer.add_scalar("losses/distill_loss", distill_loss.item(), global_step)  # Backward compatibility
-                        if args.teacher_distill:
-                            writer.add_scalar("losses/teacher_distill_loss", teacher_distill_loss.item(), global_step)
+                        writer.add_scalar("losses/distill_loss", distill_loss.item(), global_step)
                     
                 num_updates += 1
             
@@ -502,17 +575,23 @@ if __name__ == "__main__":
                 import gc
                 gc.collect()
 # Example usage:
-# Multi-Teacher Distillation with Spectral Method:
-# python sac_finetune.py --use_tb --device cuda:0 --distillation --teacher_distill --teacher_method spectral --distill_coeff 0.5 --teacher_coeff 0.8 --teacher_temperature 2.0
+# Priority-based Finetuning with Spectral Teacher:
+# python sac_finetune_prior.py --use_tb --device cuda:0 --distillation --distill_coeff 0.8 --teacher_method betweenness --teacher_distill
 
-# Option 1 - Distillation (default):
-# python sac_finetune.py --distillation --distill_coeff 0.5
+# Option 1 - Priority Distillation (default):
+# python sac_finetune_prior.py --distillation --distill_coeff 0.8
 
-# Option 2 - Transfer Learning (freeze GNN + low LR):
-# python sac_finetune.py  --freeze_gnn --low_lr_factor 0.01
+# Option 2 - Transfer Learning with Priority Buffer:
+# python sac_finetune_prior.py --freeze_gnn 
 
-# Option 3 - Experience Replay (mix old and new data):
-# python sac_finetune.py --replay --replay_ratio 0.2
+# Option 3 - Experience Replay with Priority:
+# python sac_finetune_prior.py --replay --replay_ratio 0.2
+
+# Option 4 - Warmup with Hard Teacher Supervision:
+# python sac_finetune_prior.py --warmup --warmup_steps 1000 --warmup_lr 1e-4 --teacher_method spectral
+
+# Option 5 - Warmup with Soft Teacher Supervision:
+# python sac_finetune_prior.py --warmup --warmup_soft --warmup_top_k 5 --warmup_temperature 1.0 --teacher_method spectral
 
 # Background execution:
-# nohup python -u sac_finetune.py --use_tb --device cuda:0 --ckpt_pth saved/mind.ckpt --distillation > finetune.out 2>&1 &
+# nohup python -u sac_finetune_prior.py --use_tb --device cuda:0 --ckpt_pth saved/mind.ckpt --distillation --warmup --warmup_soft > finetune_prior.out 2>&1 &

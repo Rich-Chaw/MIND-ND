@@ -361,21 +361,21 @@ def evaluate_sol(graph, removals):
         removals: list of node indices in removal order
     
     Returns:
-        auc: Area under the curve (using Simpson's rule)
-        robustness: Robustness metric (sum of reversed gcc_eps / n_init)
+        auc: Area under the curve (using Simpson's rule) in MIND
+        robustness: Robustness metric following FINDER C++ getRobustness implementation
     '''
+    if len(removals) == 0:
+        print("empty removal when evaluate sol")
+        return 0.0 ,0.0
+
     from scipy.integrate import simpson
     
     temp_G = graph.copy()
     ensure_static_id(temp_G)
     n_init = temp_G.vcount()
     
-    # Track LCC size at each step (normalized) - start with initial state
+    # Track LCC size at each step (normalized)
     gcc_eps = []
-    
-    # Initial LCC size (should be 1.0 for connected graphs)
-    # initial_lcc_size = get_lcc_size(temp_G) / n_init
-    # gcc_eps.append(initial_lcc_size)
     
     # Remove nodes one by one and track LCC after each removal
     for node_id in removals:
@@ -397,43 +397,66 @@ def evaluate_sol(graph, removals):
             # Node already removed or doesn't exist
             continue
     
-    # Compute metrics following Logger class implementation
     auc = simpson(gcc_eps, dx=1)
     robustness = sum(gcc_eps[::-1][:-1]) / n_init
     
+    # Calculate robustness using the same method as FINDER C++ getRobustness
+    # Start with empty graph and add nodes back in reverse order
+    # active_nodes = set()
+    # total_max_num = 0.0
+    
+    # # Process removals in reverse order (last removed first)
+    # for node_id in reversed(removals):
+    #     # Add node back to active set
+    #     active_nodes.add(node_id)
+        
+    #     # Create subgraph with active nodes and their edges
+    #     if len(active_nodes) > 0:
+    #         # Find vertices that correspond to active nodes
+    #         active_vertex_indices = [i for i, v in enumerate(graph.vs) if v['static_id'] in active_nodes]
+    #         if len(active_vertex_indices) > 0:
+    #             subgraph = graph.induced_subgraph(active_vertex_indices)
+              
+    #     # Add edges involving this node if both endpoints are active
+    #     edges_to_add = []
+    #     for u, v in original_edges:
+    #         orig_u = graph.vs[u]['static_id']
+    #         orig_v = graph.vs[v]['static_id']
+            
+    #         if orig_u == node_id and orig_v in active_nodes:
+    #             edges_to_add.append((orig_u, orig_v))
+    #         elif orig_v == node_id and orig_u in active_nodes:
+    #             edges_to_add.append((orig_u, orig_v))
+        
+    #     # Create subgraph with active nodes and their edges
+    #     if len(active_nodes) > 0:
+    #         subgraph = graph.induced_subgraph([i for i, v in enumerate(graph.vs) if v['static_id'] in active_nodes])
+    #         if subgraph.vcount() > 0:
+    #             lcc_size = get_lcc_size(subgraph)  # Absolute LCC size (not normalized)
+    #             total_max_num += lcc_size
+    
+    # # Subtract final LCC size (when all nodes are back)
+    # if len(active_nodes) > 0:
+    #     final_lcc_size = get_lcc_size(graph)
+    #     total_max_num -= final_lcc_size
+    
+    # # Normalize by n^2 as in C++ implementation
+    # robustness = total_max_num / (n_init * n_init)
+    
     return auc, robustness
 
-def create_dismantling_comparison_complete(graph, methods, output_dir="dismantling_analysis"):
-    """
-    Run dismantling methods and create both static plots and GIF animations
-    """
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-    
-    # Ensure graph has static_id
-    ensure_static_id(graph)
-    
-    # Run all methods and collect results
-    methods_results = {}
-    n_init = graph.vcount()
-    
-    print("Running dismantling methods...")
-    for name, func in methods.items():
-        print(f"  Running {name}...")
-        removals = func(graph)
-        methods_results[name] = removals
-    
-    # Create static comparison plot
-    from visualize_dismantling import visualize_multiple_curve,visualize_multiple_dynamic
-    save_path = visualize_multiple_curve(graph,methods_results,
-                                    save_path=os.path.join(output_dir, 'dismantling_comparison.png'))
-    
-    # Create GIF animations
-    gif_paths = visualize_multiple_dynamic(graph, methods_results, 
-                                         output_dir = os.path.join(output_dir, 'gifs'))
-    
-    return methods_results, save_path, gif_paths
-
+# Usage
+METHODS = {
+    "Random": random_dismantling,
+    "CoreHD": core_hd,
+    "Spectral": spectral_dismantling,
+    "SpectralA":spectral_dismantling_advance,
+    "Degree": adaptive_degree,
+    "BPD": bpd_dismantling,
+    "Betweenness": adaptive_betweenness,
+    "PageRank": adaptive_pagerank,
+    "CI": adaptive_ci,
+}
 
 def baseline_dismantling(graph, methods,max_steps=None,visualize=False):
     ensure_static_id(graph)
@@ -444,7 +467,7 @@ def baseline_dismantling(graph, methods,max_steps=None,visualize=False):
     plt.figure(figsize=(6,4))
     for name, func in methods.items():
         # Get the sequence of nodes to remove
-        removals = func(graph,max_steps)
+        removals = func(graph,max_steps=max_steps)
 
         auc, r = evaluate_sol(graph,removals)
         print(f"method {name}: AUC={auc}, Robustness={r}")
@@ -456,6 +479,31 @@ def baseline_dismantling(graph, methods,max_steps=None,visualize=False):
         visualize_multiple_curve(graph,methods_results)
 
     return methods_results
+
+#-----------------------------------------------------------------
+# Usage
+METHODS = {
+    "Random": random_dismantling,
+    "CoreHD": core_hd,
+    "Spectral": spectral_dismantling,
+    "SpectralA":spectral_dismantling_advance,
+    "Degree": adaptive_degree,
+    "BPD": bpd_dismantling,
+    "Betweenness": adaptive_betweenness,
+    "PageRank": adaptive_pagerank,
+    "CI": adaptive_ci,
+}
+
+# Import FINDER methods
+def finder_dismantling_wrapper(G, max_steps=None):
+    from baseline_rl.finder import finder
+    removals, score, MaxCCList = finder(G)
+    print(len(set(removals)))
+    return removals
+
+METHODS.update({
+    "FINDER": finder_dismantling_wrapper
+})
 
 # Import GND methods
 try:
@@ -485,18 +533,6 @@ def gnd_with_reinsertion_wrapper(G, max_steps=None):
     return gnd_with_reinsertion(G, target_size_ratio=0.01, use_weighted=True, 
                                reinsertion_threshold=max(100, G.vcount()//10))
 
-# Usage
-METHODS = {
-    "Random": random_dismantling,
-    "CoreHD": core_hd,
-    "Spectral": spectral_dismantling,
-    "SpectralA":spectral_dismantling_advance,
-    "Degree": adaptive_degree,
-    "BPD": bpd_dismantling,
-    "Betweenness": adaptive_betweenness,
-    "PageRank": adaptive_pagerank,
-    "CI": adaptive_ci,
-}
 
 # Add GND methods if available
 if GND_AVAILABLE:
@@ -537,4 +573,25 @@ if __name__ == "__main__":
         print(f"Nodes: {graph.vcount()}, Edges: {graph.ecount()}")
         
         output_dir = os.path.join("baseline_dismantling_analysis",f"{graph_name.lower().replace(' ', '_')}")
-        results = create_dismantling_comparison_complete(graph, methods, output_dir)
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+    
+        # Ensure graph has static_id
+        ensure_static_id(graph)
+        
+        # Run all methods and collect results
+        methods_results = {}
+        n_init = graph.vcount()
+        
+        print("Running dismantling methods...")
+        for name, func in methods.items():
+            print(f"  Running {name}...")
+            removals = func(graph)
+            methods_results[name] = removals
+        
+        # Create static comparison plot
+        from visualize_dismantling import visualize_multiple_curve,visualize_multiple_dynamic
+        save_path = visualize_multiple_curve(graph,methods_results,
+                                        save_path=os.path.join(output_dir, 'dismantling_comparison.png'))
+        
+
