@@ -12,25 +12,28 @@ import igraph as ig
 import os
 import time
 import warnings
-from baseline import METHODS, evaluate_sol, ensure_static_id
-from graphs.graph_models import stochastic_block_model, watts_strogatz_model
+from baseline import METHODS, evaluate_sol, ensure_attribute
+from graphs.graph_models import SBM, WS
 
 warnings.filterwarnings('ignore')
 
 # Configuration
 CONFIG = {
-    'n_graphs': 100,
-    'n_nodes': 150,
+    'n_graphs': 30,
+    'nrange': "50_100",
     'max_test_graphs': 30,
-    'baseline_methods': ["Degree", "Spectral", "Betweenness", "CI", "CoreHD"],
+    'baseline_methods': ["Degree", "Spectral", "Betweenness", "CI"],
     'mind_checkpoints': [
         'saved/mind.ckpt',
-        'saved/finetune_20251218_185945/13499.ckpt',
-        'saved/finetune_20251222_000136/6499.ckpt',
-        'saved/finetune_20251222_210303/2999.ckpt',
-        'saved/finetune_20251223_141913/2999.ckpt'
     ]
 }
+mind_dir = "saved/finetune_prior_20260106_075408"
+max_step = 10000
+mind_checkpoints = [os.path.join(mind_dir,p) for p in os.listdir(mind_dir) 
+                        if p.split('.')[0].isdigit() and int(p.split('.')[0]) < max_step]
+CONFIG["mind_checkpoints"].extend(mind_checkpoints)
+# CONFIG["mind_checkpoints"].append('saved/finetune_20251231_163953/warmup/warmup_best_step_130_auc_0.2715.ckpt')
+N_METHODS = len(CONFIG["baseline_methods"]) + len(CONFIG["mind_checkpoints"])
 
 def dismantling_mind(g: ig.Graph, ckpt_pth: str, step_ratio: float = 0.0):
     """MIND dismantling method wrapper"""
@@ -55,43 +58,55 @@ def dismantling_mind(g: ig.Graph, ckpt_pth: str, step_ratio: float = 0.0):
         print(f"Error with MIND checkpoint {os.path.basename(ckpt_pth)}: {e}")
         return None
 
-def generate_test_graphs(n_graphs=50, n_nodes=150):
+def generate_test_graphs(n_graphs=50, nrange="100_150"):
     """Generate test graphs with parameter diversity"""
-    print(f"Generating {n_graphs} graphs of each type with ~{n_nodes} nodes...")
+    print(f"Generating {n_graphs} graphs of each type with {nrange} nodes...")
     
     graphs = {'BA': [], 'WS': [], 'SBM': []}
     np.random.seed(42)
+    n_min = int(nrange.split("_")[0])
+    n_max = int(nrange.split("_")[1])
+
+    # # BA graphs
+    # i = 0
+    # while i < n_graphs:
+    #     n_nodes = np.random.randint(n_min,n_max+1)
+    #     m = np.random.randint(1, 7)
+    #     g = ig.Graph.Barabasi(n=n_nodes, m=m, directed=False)
+    #     if g.is_connected() and g.vcount() >= n_min:
+    #         ensure_attribute(g)
+    #         g['name'] = f'BA_{i}'
+    #         graphs['BA'].append(g)
+    #         i +=1
     
-    # BA graphs
-    for i in range(n_graphs):
-        m = np.random.randint(2, 6)
-        g = ig.Graph.Barabasi(n=n_nodes, m=m, directed=False)
-        if g.is_connected() and g.vcount() >= 50:
-            ensure_static_id(g)
-            g['name'] = f'BA_{i}'
-            graphs['BA'].append(g)
-    
-    # WS graphs
-    for i in range(n_graphs):
-        k = np.random.choice([4, 6, 8, 10])
-        p = np.random.uniform(0.05, 0.4)
-        g = watts_strogatz_model(n_nodes, k, p)
-        if g.is_connected() and g.vcount() >= 50:
-            ensure_static_id(g)
-            g['name'] = f'WS_{i}'
-            graphs['WS'].append(g)
+    # # WS graphs
+    # i = 0
+    # while i < n_graphs:
+    #     n_nodes = np.random.randint(n_min,n_max+1)
+    #     k = np.random.choice([4, 6, 8, 10])
+    #     p = np.random.uniform(0.05, 0.4)
+    #     g = WS(n_nodes, k, p)
+    #     if g.is_connected() and g.vcount() >= n_min:
+    #         ensure_attribute(g)
+    #         g['name'] = f'WS_{i}'
+    #         graphs['WS'].append(g)
+    #         i += 1
     
     # SBM graphs
-    for i in range(n_graphs):
-        ratio = 5 * np.random.uniform(1, 6) 
-        p_out = max(0.01, np.random.rand() / 10)
-        p_in = min(ratio * p_out, 0.9)
-        num_blocks = np.random.randint(2, 5)
-        g = stochastic_block_model(n_nodes, p_in, p_out, num_blocks)
-        if g.is_connected() and g.vcount() >= 50:
-            ensure_static_id(g)
+    i = 0
+    while i < n_graphs:
+        n_nodes = np.random.randint(n_min,n_max+1)
+        g = SBM(n_nodes, p_in=0.15, p_out=0.0075, num_blocks=2)
+        # ratio = 5 * np.random.uniform(1, 6) 
+        # p_out = max(0.01, np.random.rand() / 10)
+        # p_in = min(ratio * p_out, 0.5)
+        # num_blocks = np.random.randint(2, 5)
+        # g = SBM(n_nodes, p_in, p_out, num_blocks)
+        if g.is_connected() and g.vcount() >= n_min:
+            ensure_attribute(g)
             g['name'] = f'SBM_{i}'
             graphs['SBM'].append(g)
+            i += 1
 
     # Report statistics
     for graph_type, graph_list in graphs.items():
@@ -173,7 +188,8 @@ def run_comprehensive_comparison(graphs, baseline_methods, mind_checkpoints, max
                 if not os.path.exists(ckpt_path):
                     continue
                     
-                ckpt_name = ckpt_path.split("/")[1].split('_')[-1] + os.path.basename(ckpt_path).replace('.ckpt', '')
+                # ckpt_name = ckpt_path.split("/")[1].split('_')[-1] + os.path.basename(ckpt_path).replace('.ckpt', '')
+                ckpt_name = os.path.basename(ckpt_path)
                 mind_func = lambda g: dismantling_mind(g, ckpt_path)
                 
                 result = test_method_on_graph(graph, ckpt_name, mind_func, 'MIND')
@@ -192,10 +208,11 @@ def run_comprehensive_comparison(graphs, baseline_methods, mind_checkpoints, max
 
 def create_boxplot(df, metric, output_dir):
     """Create box plots for a specific metric"""
-    fig, axes = plt.subplots(1, 3, figsize=(20, 6))
+    fig, axes = plt.subplots(3, 1, figsize=(N_METHODS, 6*3))
     
     for i, graph_type in enumerate(['BA', 'WS', 'SBM']):
-        data = df[df['graph_type'] == graph_type].dropna(subset=[metric])
+        # data = df[df['graph_type'] == graph_type].dropna(subset=[metric])
+        data = df[df['graph_type'] == graph_type]  # seaborn handles NaN values
         
         if len(data) > 0:
             sns.boxplot(data=data, x='method', y=metric, hue='method_type', ax=axes[i])
@@ -204,13 +221,13 @@ def create_boxplot(df, metric, output_dir):
             axes[i].set_ylabel(metric.upper(), fontsize=12)
             axes[i].tick_params(axis='x', rotation=45)
             
-            # Add success rate
-            total = len(df[df['graph_type'] == graph_type])
-            successful = len(data)
-            success_rate = successful / total * 100 if total > 0 else 0
-            axes[i].text(0.02, 0.98, f'Success Rate: {success_rate:.1f}%', 
-                        transform=axes[i].transAxes, verticalalignment='top',
-                        bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.7))
+            # # Add success rate
+            # total = len(df[df['graph_type'] == graph_type])
+            # successful = len(data)
+            # success_rate = successful / total * 100 if total > 0 else 0
+            # axes[i].text(0.02, 0.98, f'Success Rate: {success_rate:.1f}%', 
+            #             transform=axes[i].transAxes, verticalalignment='top',
+            #             bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.7))
         else:
             axes[i].text(0.5, 0.5, 'No valid data', ha='center', va='center', 
                         transform=axes[i].transAxes, fontsize=16)
@@ -272,7 +289,7 @@ def create_comprehensive_plots(df, output_dir="comprehensive_results"):
     
     # Create plots
     create_boxplot(df, 'auc', output_dir)
-    create_boxplot(df, 'robustness', output_dir)
+    # create_boxplot(df, 'robustness', output_dir)
     # create_success_rate_plot(df, output_dir)
     
     # Statistical summary
@@ -333,7 +350,7 @@ def main():
         print(f"  - {ckpt}")
     
     # Generate test graphs
-    graphs = generate_test_graphs(CONFIG['n_graphs'], CONFIG['n_nodes'])
+    graphs = generate_test_graphs(CONFIG['n_graphs'], CONFIG['nrange'])
     
     # Run comparison
     results_df = run_comprehensive_comparison(

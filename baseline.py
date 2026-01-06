@@ -8,10 +8,13 @@ import os
 import time
 import gc
 
-def ensure_static_id(graph):
-    """Ensure graph has static_id attribute"""
+def ensure_attribute(graph):
+    """Ensure graph has static_id attribute and n_init"""
     if 'static_id' not in graph.vs.attributes():
         graph.vs['static_id'] = list(range(graph.vcount()))
+    
+    if 'n_init' not in graph.vs.attributes():
+        graph.vs['n_init'] = graph.vcount()
 
 def get_lcc_size(graph):
     """Get the size of the largest connected component"""
@@ -20,17 +23,25 @@ def get_lcc_size(graph):
     components = graph.connected_components()
     return max(components.sizes())
 
-def spectral_dismantling(G, max_steps=None):
+def is_terminal(G,threshold):
+    if threshold == None:
+        target_size = 3
+    else: target_size = G['n_init']
+
+    if G.vcount() < target_size or G.ecount() == 0:
+        return True
+    else: return False
+
+def spectral_dismantling(G, max_steps=None, threshold=None):
     temp_G = G.copy()
-    ensure_static_id(temp_G)
+    ensure_attribute(temp_G)
     removals = []
     if max_steps == None:
         max_steps = temp_G.vcount()
     else:
         max_steps = min(temp_G.vcount(), max_steps)
     for _ in range(max_steps):
-        if temp_G.vcount() <= 2 or temp_G.ecount() == 0: 
-            break
+        if is_terminal(temp_G,threshold): break
         
         # 1. Get Laplacian (as sparse matrix)
         L = np.array(temp_G.laplacian())
@@ -56,105 +67,9 @@ def spectral_dismantling(G, max_steps=None):
         
     return removals
 
-
-def spectral_dismantling_advance(G, max_steps=None):
-    """
-    Improved spectral dismantling following GND approach
-    Uses power iteration and spectral clustering
-    much slower but more stable and performs better than spectral_dismantling
-    """
-    import gc
+def core_hd(G, max_steps=None, threshold=None):
     temp_G = G.copy()
-    ensure_static_id(temp_G)
-    removals = []
-    
-    if max_steps is not None:
-        max_steps = min(temp_G.vcount(), max_steps)
-    
-    while True:
-        if temp_G.vcount() <= 2 or temp_G.ecount() == 0: 
-            break
-        
-        # Check max_steps limit
-        if max_steps is not None and len(removals) >= max_steps:
-            break
-        
-        # Convert to adjacency matrix
-        adj_matrix = np.array(temp_G.get_adjacency().data)
-        n = adj_matrix.shape[0]
-        
-        if n <= 2:
-            break
-        
-        # Power iteration for Fiedler vector (more stable than eigsh for small matrices)
-        x = np.random.uniform(-1, 1, n)
-        
-        # Create Laplacian matrix L = D - A
-        degrees = np.sum(adj_matrix, axis=1)
-        L = np.diag(degrees) - adj_matrix
-        
-        # Power iteration to find smallest non-zero eigenvalue's eigenvector
-        for _ in range(50):  # More iterations for stability
-            # Shift to avoid zero eigenvalue: (L + I)^-1
-            try:
-                L_shifted = L + np.eye(n)
-                x_new = np.linalg.solve(L_shifted, x)
-                # Orthogonalize against constant vector
-                x_new = x_new - np.mean(x_new)
-                norm = np.linalg.norm(x_new)
-                if norm > 1e-10:
-                    x = x_new / norm
-                else:
-                    break
-            except np.linalg.LinAlgError:
-                # Fallback to simple degree-based removal
-                idx_to_remove = np.argmax(temp_G.degree())
-                removals.append(temp_G.vs[idx_to_remove]['static_id'])
-                temp_G.delete_vertices(idx_to_remove)
-                break
-        else:
-            # Use Fiedler vector to partition and find cut
-            # Find edges crossing the partition (positive vs negative values)
-            crossing_edges = []
-            for edge in temp_G.es:
-                u, v = edge.tuple
-                if x[u] * x[v] < 0:  # Different signs
-                    crossing_edges.append((u, v))
-            
-            if len(crossing_edges) == 0:
-                # No clear partition, remove node closest to zero
-                idx_to_remove = np.argmin(np.abs(x))
-            else:
-                # Remove node that appears in most crossing edges (simple heuristic)
-                node_counts = {}
-                for u, v in crossing_edges:
-                    node_counts[u] = node_counts.get(u, 0) + 1
-                    node_counts[v] = node_counts.get(v, 0) + 1
-                
-                if node_counts:
-                    idx_to_remove = max(node_counts.keys(), key=lambda k: node_counts[k])
-                else:
-                    idx_to_remove = np.argmax(temp_G.degree())
-            
-            removals.append(temp_G.vs[idx_to_remove]['static_id'])
-            temp_G.delete_vertices(idx_to_remove)
-        
-        # Explicit memory cleanup for large matrices
-        del adj_matrix, degrees, L, x
-        if 'L_shifted' in locals():
-            del L_shifted
-        if 'x_new' in locals():
-            del x_new
-        
-        # Force garbage collection every 5 iterations (more frequent due to larger matrices)
-        if len(removals) % 5 == 0:
-            gc.collect()
-        
-    return removals
-
-def core_hd(G, max_steps=None):
-    temp_G = G.copy()
-    ensure_static_id(temp_G)
+    ensure_attribute(temp_G)
     removals = []
     
     if max_steps == None:
@@ -163,8 +78,8 @@ def core_hd(G, max_steps=None):
         max_steps = min(temp_G.vcount(), max_steps)
     
     for _ in range(max_steps):
-        if temp_G.vcount() <= 2 or temp_G.ecount() == 0: 
-            break
+        if is_terminal(temp_G,threshold): break
+        
         # 1. Calculate Coreness (k-shell decomposition)
         coreness = temp_G.coreness()
         
@@ -185,9 +100,9 @@ def core_hd(G, max_steps=None):
         
     return removals
 
-def adaptive_degree(G, max_steps=None):
+def adaptive_degree(G, max_steps=None, threshold=None):
     temp_G = G.copy()
-    ensure_static_id(temp_G)
+    ensure_attribute(temp_G)
     removals = []
     
     if max_steps == None:
@@ -195,18 +110,35 @@ def adaptive_degree(G, max_steps=None):
     else:
         max_steps = min(temp_G.vcount(), max_steps)
     for _ in range(max_steps):
-        if temp_G.vcount() <= 2 or temp_G.ecount() == 0: 
-            break
+        if is_terminal(temp_G,threshold): break
         
         idx_to_remove = np.argmax(temp_G.degree())
         removals.append(temp_G.vs[idx_to_remove]['static_id'])
         temp_G.delete_vertices(idx_to_remove)
     return removals
 
-def adaptive_betweenness(G, max_steps=None):
+def betweenness(G, max_steps=None, threshold=None):
+    """betweenness centrality dismantling - compute all betweenness from beginning"""
+    temp_G = G.copy()
+    ensure_attribute(temp_G)
+    
+    if max_steps == None:
+        max_steps = temp_G.vcount()
+    else:
+        max_steps = min(temp_G.vcount(), max_steps)
+    
+    betweenness= temp_G.betweenness()
+    sorted_indices = np.argsort(betweenness)[::-1]
+    
+    # Return the static_ids of top max_steps nodes
+    removals = sorted_indices[:max_steps]
+
+    return removals
+
+def adaptive_betweenness(G, max_steps=None, threshold=None):
     """Adaptive betweenness centrality dismantling"""
     temp_G = G.copy()
-    ensure_static_id(temp_G)
+    ensure_attribute(temp_G)
     removals = []
     
     if max_steps == None:
@@ -214,8 +146,7 @@ def adaptive_betweenness(G, max_steps=None):
     else:
         max_steps = min(temp_G.vcount(), max_steps)
     for _ in range(max_steps):
-        if temp_G.vcount() <= 2 or temp_G.ecount() == 0: 
-            break
+        if is_terminal(temp_G,threshold): break
         
         betweenness = temp_G.betweenness()
         idx_to_remove = np.argmax(betweenness)
@@ -223,10 +154,10 @@ def adaptive_betweenness(G, max_steps=None):
         temp_G.delete_vertices(idx_to_remove)
     return removals
 
-def adaptive_pagerank(G, max_steps=None):
+def adaptive_pagerank(G, max_steps=None, threshold=None):
     """Adaptive PageRank dismantling"""
     temp_G = G.copy()
-    ensure_static_id(temp_G)
+    ensure_attribute(temp_G)
     removals = []
     
     if max_steps == None:
@@ -234,8 +165,7 @@ def adaptive_pagerank(G, max_steps=None):
     else:
         max_steps = min(temp_G.vcount(), max_steps)
     for _ in range(max_steps):
-        if temp_G.vcount() <= 2 or temp_G.ecount() == 0: 
-            break
+        if is_terminal(temp_G,threshold): break
         
         pagerank = temp_G.pagerank()
         idx_to_remove = np.argmax(pagerank)
@@ -243,10 +173,10 @@ def adaptive_pagerank(G, max_steps=None):
         temp_G.delete_vertices(idx_to_remove)
     return removals
 
-def adaptive_ci(G, max_steps=None):
+def adaptive_ci(G, max_steps=None, threshold=None):
     """Adaptive Collective Influence dismantling"""
     temp_G = G.copy()
-    ensure_static_id(temp_G)
+    ensure_attribute(temp_G)
     removals = []
     
     if max_steps == None:
@@ -255,8 +185,7 @@ def adaptive_ci(G, max_steps=None):
         max_steps = min(temp_G.vcount(), max_steps)
     
     for _ in range(max_steps):
-        if temp_G.vcount() <= 2 or temp_G.ecount() == 0: 
-            break
+        if is_terminal(temp_G,threshold): break
         
         # Collective Influence with radius 2
         ci_scores = []
@@ -279,10 +208,10 @@ def adaptive_ci(G, max_steps=None):
     return removals
 
 
-def random_dismantling(G, max_steps=None):
+def random_dismantling(G, max_steps=None, threshold=None):
     """Random dismantling for comparison"""
     temp_G = G.copy()
-    ensure_static_id(temp_G)
+    ensure_attribute(temp_G)
     
     # Get all node IDs and shuffle them
     node_ids = [v['static_id'] for v in temp_G.vs]
@@ -293,13 +222,13 @@ def random_dismantling(G, max_steps=None):
         return node_ids[:max_steps]
     return node_ids
 
-def bpd_dismantling(G, max_steps=None):
+def bpd_dismantling(G, max_steps=None, threshold=None):
     """
     Belief Propagation Decimation (Min-Sum inspired) for Network Dismantling.
     Targets the Feedback Vertex Set (nodes that break cycles).
     """
     temp_G = G.copy()
-    ensure_static_id(temp_G)
+    ensure_attribute(temp_G)
     removals = []
     
     if max_steps == None:
@@ -311,7 +240,7 @@ def bpd_dismantling(G, max_steps=None):
     x = 10.0  # Sensitivity parameter (resembles inverse temperature)
     
     for _ in range(max_steps):
-        if temp_G.vcount() <= 2 or temp_G.ecount() == 0: 
+        if is_terminal(temp_G,threshold): 
             break
         
         N = temp_G.vcount()
@@ -371,7 +300,7 @@ def evaluate_sol(graph, removals):
     from scipy.integrate import simpson
     
     temp_G = graph.copy()
-    ensure_static_id(temp_G)
+    ensure_attribute(temp_G)
     n_init = temp_G.vcount()
     
     # Track LCC size at each step (normalized)
@@ -450,16 +379,16 @@ METHODS = {
     "Random": random_dismantling,
     "CoreHD": core_hd,
     "Spectral": spectral_dismantling,
-    "SpectralA":spectral_dismantling_advance,
     "Degree": adaptive_degree,
     "BPD": bpd_dismantling,
+    "BetweennessNA": betweenness,
     "Betweenness": adaptive_betweenness,
     "PageRank": adaptive_pagerank,
     "CI": adaptive_ci,
 }
 
 def baseline_dismantling(graph, methods,max_steps=None,visualize=False):
-    ensure_static_id(graph)
+    ensure_attribute(graph)
     n_init = graph.vcount() 
     methods_results = {}
     color_map = ['blue','orange','green','grey']
@@ -481,19 +410,6 @@ def baseline_dismantling(graph, methods,max_steps=None,visualize=False):
     return methods_results
 
 #-----------------------------------------------------------------
-# Usage
-METHODS = {
-    "Random": random_dismantling,
-    "CoreHD": core_hd,
-    "Spectral": spectral_dismantling,
-    "SpectralA":spectral_dismantling_advance,
-    "Degree": adaptive_degree,
-    "BPD": bpd_dismantling,
-    "Betweenness": adaptive_betweenness,
-    "PageRank": adaptive_pagerank,
-    "CI": adaptive_ci,
-}
-
 # Import FINDER methods
 def finder_dismantling_wrapper(G, max_steps=None):
     from baseline_rl.finder import finder
@@ -577,7 +493,7 @@ if __name__ == "__main__":
             os.makedirs(output_dir)
     
         # Ensure graph has static_id
-        ensure_static_id(graph)
+        ensure_attribute(graph)
         
         # Run all methods and collect results
         methods_results = {}

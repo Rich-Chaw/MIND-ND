@@ -176,7 +176,7 @@ def visualize_multiple_curve(graph, methods_results,step_ratio = None, save_path
         lcc_sizes,removed_sizes = get_curve_list(graph,removals,step_ratio)
         x = np.array(removed_sizes) / n_init
         y = np.array(lcc_sizes) / n_init
-        plt.plot(x, y, color=colors[i], linewidth=2, 
+        plt.plot(x, y, color=colors[i], linewidth=2,linestyle= '--',
                 marker='o', markersize=3, label=method_name, alpha=0.8)
     
     plt.xlabel('Fraction of Nodes Removed', fontsize=12)

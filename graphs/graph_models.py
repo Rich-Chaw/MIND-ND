@@ -56,7 +56,115 @@ def _ring_based_regular(N, k):
     return g
 
 
-def watts_strogatz_model(N, k, p):
+def barbell(N,p_in,path_len=3,type="SBM"):
+    """
+    Generates two SBM clusters (equal to ER graphs) connected by a thin path (bridges).
+    """
+    # 1. Generate two communities with high internal density
+    # Community 1: nodes 0 to 49, Community 2: nodes 50 to 99
+    if type == "SBM":
+        p_out = 0.0
+        G = SBM(N,p_in,p_out,num_blocks=2)
+    elif type == "ER":
+        bell_size = N // 2
+        bell1 = ig.Graph.Erdos_Renyi(bell_size, p_in)
+        bell2 = ig.Graph.Erdos_Renyi(bell_size, p_in)
+        G = bell1 + bell2
+    elif type == "BA":
+        bell_size = N // 2
+        bell1 = ig.Graph.Barabasi(bell_size, m = int(bell_size*p_in)//2)
+        bell2 = ig.Graph.Barabasi(bell_size, m = int(bell_size*p_in)//2)
+        G = bell1 + bell2
+    
+    # 2. Add a 'bridge' path connecting them
+    bridge_start_idx = G.vcount()
+    G.add_vertices(path_len)
+    edges = []
+    # Link cluster 1 to first bridge node
+    edges.append((int(N/2) - 1, bridge_start_idx))
+    
+    # Link bridge nodes together
+    for i in range(path_len - 1):
+        edges.append((bridge_start_idx + i, bridge_start_idx + i + 1))
+        
+    # Link last bridge node to cluster 2
+    edges.append((bridge_start_idx + path_len - 1, int(N/2)))
+    G.add_edges(edges)
+    return G
+
+def star_community(N,p_in=0.4, num_communities=4,type="ER"):
+    '''星形社区图'''
+    G = ig.Graph(n=1) # The Relay Node at index 0
+    community_size = N//num_communities
+    for i in range(num_communities):
+        # Create a community
+        if type == "ER":
+            block = ig.Graph.Erdos_Renyi(community_size, p_in)
+        elif type == "BA":
+            block = ig.Graph.Barabasi(community_size, m=int(N*p_in)//2,directed=False)
+        
+        # Add to main graph
+        start_index = G.vcount()
+        G += block
+        
+        # Connect the first node of this new block to the Relay Node (0)
+        G.add_edge(0, start_index)
+        
+    return G
+
+def ring_community(N,p_in=0.4, num_communities=4,type="ER"):
+    community_size = N//num_communities
+    if type == "ER":
+        communities = [ig.Graph.Erdos_Renyi(community_size, p_in) for _ in range(num_communities)]
+    elif type == "BA":
+        m = int(community_size*p_in)//2
+        communities = [ig.Graph.Barabasi(community_size, m) for _ in range(num_communities)]
+    
+    # Combine all into one graph
+    ring = communities[0]
+    for i in range(1, num_communities):
+        ring = ring + communities[i]
+    
+    # Connect them in a circle
+    for i in range(num_communities):
+        # Connect community i to community i+1 (with wrap around)
+        node_in_curr = i * community_size
+        node_in_next = ((i + 1) % num_communities) * community_size
+        ring.add_edge(node_in_curr, node_in_next)
+    
+    return ring
+
+def clique(N):
+    '''全连接图'''
+    clique = ig.Graph.Full(n=N)
+    return clique
+
+def necklace(N, num_cliques=5):
+    G = ig.Graph()
+    clique_size = N//num_cliques
+    clique_connectors = [] # Stores (entry_node, exit_node) for each clique
+    
+    for i in range(num_cliques):
+        start_idx = G.vcount()
+        # Create a Full Clique
+        cli = clique(clique_size)
+        G += cli
+        
+        # Mark first and last node of this clique for connections
+        clique_connectors.append((start_idx, start_idx + clique_size - 1))
+    
+    # Connect cliques in a ring
+    for i in range(num_cliques):
+        curr_exit = clique_connectors[i][1]
+        next_entry = clique_connectors[(i + 1) % num_cliques][0]
+        G.add_edge(curr_exit, next_entry)
+        
+    return G
+
+
+
+
+def WS(N, k, p):
     """
     Generate a Watts-Strogatz (WS) small-world model
     
@@ -172,47 +280,73 @@ def copying_model(N, m, gamma):
     return g
 
 
-def stochastic_block_model(N,p_in,p_out,num_blocks=None):    
+def SBM(N,p_in,p_out,num_blocks=None, unbalanced = False):    
     """Generate a Stochastic Block Model (SBM) using igraph's built-in SBM function"""
     if num_blocks is None:
         num_blocks = np.random.randint(2, 5)  # 2-4 blocks
     
     # Simple equal block sizes
-    n_nodes = [N // num_blocks] * num_blocks
-    n_nodes[-1] += N % num_blocks  # Add remainder to last block
+    if unbalanced:
+        weights = np.geomspace(1, 0.1, num_blocks) 
+        n_nodes = (weights / weights.sum() * N).astype(int)
+        # Adjust for rounding errors to ensure sum(n_nodes) == N
+        n_nodes[-1] += N - sum(n_nodes)
+    else:
+        n_nodes = [N // num_blocks] * num_blocks
+        n_nodes[-1] += N % num_blocks  # Add remainder to last block
+    membership = []
+    for block_idx, size in enumerate(n_nodes):
+        membership.extend([block_idx] * size)
     
     pref_matrix = np.full((num_blocks, num_blocks), p_out)
     np.fill_diagonal(pref_matrix, p_in)
     
     # Generate SBM
     g = ig.Graph.SBM(sum(n_nodes), pref_matrix, n_nodes, directed=False, loops=False)
-    
-    return g
-    # TO DELEBLOP: Herichcial SBM
 
-def herichcial_stochastic_block_model(N,num_blocks=None):    
-    """Generate a Stochastic Block Model (SBM) using igraph's built-in SBM function"""
-    if num_blocks is None:
-        num_blocks = np.random.randint(2, 5)  # 2-4 blocks
-    
+    # Track community membership for plotting
+    g.vs["community"] = membership
+    return g
+
+
+def DCSBM(N, p_in, p_out, num_blocks, unbalanced=False):
+    """
+    Simulates a Degree-Corrected SBM.
+    Note: Standard ig.Graph.SBM doesn't take a theta vector directly.
+    We simulate this by creating a custom probability matrix for all N x N nodes.
+    """
     # Simple equal block sizes
-    n_nodes = [N // num_blocks] * num_blocks
-    n_nodes[-1] += N % num_blocks  # Add remainder to last block
-    
-        # Use ratio: p_in should be 5-10x higher than p_out for good modularity
-    ratio = 5 * np.random.uniform(1,6) # 5-10x
-    
-    p_out = np.random.uniform(0.01,0.1)
-    p_in = ratio*p_out
+    if unbalanced:
+        weights = np.geomspace(1, 0.1, num_blocks) 
+        n_nodes = (weights / weights.sum() * N).astype(int)
+        # Adjust for rounding errors to ensure sum(n_nodes) == N
+        n_nodes[-1] += N - sum(n_nodes)
+    else:
+        n_nodes = [N // num_blocks] * num_blocks
+        n_nodes[-1] += N % num_blocks  # Add remainder to last block
+    membership = []
+    for block_idx, size in enumerate(n_nodes):
+        membership.extend([block_idx] * size)
 
-    pref_matrix = np.full((num_blocks, num_blocks), p_out)
-    np.fill_diagonal(pref_matrix, p_in)
+    # 2. Assign a 'theta' (popularity score) to each node
+    # Most nodes are low-degree, few are hubs (Power Law-ish)
+    thetas = np.random.pareto(2.5, N) + 0.5 
     
-    # Generate SBM
-    g = ig.Graph.SBM(sum(n_nodes), pref_matrix, n_nodes, directed=False, loops=False)
-    
+    # 3. Build the full N x N probability matrix
+    # P_ij = theta_i * theta_j * P_block_i_block_j
+    edges = []
+    for i in range(N):
+        for j in range(i + 1, N):
+            base_p = p_in if membership[i] == membership[j] else p_out
+            # Combine thetas with base probability
+            prob = thetas[i] * thetas[j] * base_p
+            if np.random.rand() < prob:
+                edges.append((i, j))
+
+    g = ig.Graph(n=N, edges=edges, directed=False)
+    g.vs["community"] = membership
+
     return g
-    # TO DELEBLOP: Herichcial SBM
 
 def corrupting(g):
     """
@@ -561,7 +695,7 @@ if __name__ == '__main__':
                 p = np.random.choice([0.05,0.1,0.15,0.2])
                 watts_strogatz_model(N, k=m, p=p)
             elif topology == 'SBM':
-                net = stochastic_block_model(N, m)
+                net = SBM(N, m)
             elif topology == 'RGG':
                 r = np.sqrt(np.log(N) / (np.pi * N))
                 r = np.random.uniform(1.1,2.0) * r

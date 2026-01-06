@@ -15,7 +15,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from env import DismantleEnv
 from networks.dismantle import load_dismantler
-from utils import ReplayBuffer, FinetuneBuffer, Batch, validate, ig_to_data
+from utils import ReplayBuffer, FinetuneBuffer, Batch, validate, validate_with_type_logging, ig_to_data
 import torch.nn.functional as F
 import gc
 
@@ -33,7 +33,7 @@ class Args:
     """number of parallel environments,default 64"""
     total_steps: int=20000
     """number of training steps (transitions = steps*num_envs), default 200000"""
-    buffer_size: int=1000000
+    buffer_size: int=500000
     """size of the replay buffer, default 2000000"""
     batch_size: int=64
     """batch size for updating network, default 512"""
@@ -46,14 +46,14 @@ class Args:
     learning_rate: float=3e-5
     """learning rate for the policy and the Q networks, original 3e-4"""
     tau: float=1.0
-    """target smoothing factor"""
+    """target smoothing factor,default 1.0"""
     alpha: float=0.005
     """intensity of entropy regularization"""
     gamma: float=0.99
     """Discount factor"""
     num_updates: int=12
     """number of network updates at each step, original 16"""
-    target_frequency: int=100
+    target_frequency: int=50
     """the frequency for updating the target networks, default 200"""
 
     ckpt_pth: Optional[str]='saved/mind.ckpt'
@@ -61,7 +61,7 @@ class Args:
     pretrained_ckpt_pth: Optional[str]='saved/mind.ckpt'
 
     '''options'''
-    distillation: bool=True
+    distillation: bool=False
     distill_coeff: float=0.8
     """distillation coefficient lambda for preventing forgetting (λ1)"""
 
@@ -73,25 +73,35 @@ class Args:
     """ratio of original data to mix with new data """
     
     # Teacher method settings
-    teacher_method: str = 'spectral'
+    teacher_method: Optional[str] = None
     """Teacher method: 'spectral', 'betweenness'"""
-    teacher_distill: bool = True
+    teacher_distill: bool = False
     """Add teacher experience to buffer"""
     
+    # Priority sampling settings
+    priority_type: Optional[str] = None
+    """Priority type for sampling: 'LCC', 'TDE', 'DIFF'"""
+    
+    # demeonstration setting
+    demonstrate: bool = False
+    """Save demonstation in teacher buffer before training"""
+
     # Warmup settings
     warmup: bool = False
     """Enable warmup phase with teacher supervision"""
-    warmup_steps: int = 1000
+    warmup_steps: int = 200
     """Number of warmup steps for teacher supervision"""
-    warmup_lr: float = 1e-4
+    warmup_lr: float = 3e-5
     """Learning rate for warmup phase"""
-    warmup_soft: bool = False
-    """Use soft teacher probabilities in warmup phase"""
-    warmup_top_k: int = 5
-    """Number of top-k actions to consider for soft teacher"""
-    warmup_temperature: float = 1.0
-    """Temperature for soft teacher distribution"""
- 
+    
+    # Reward shaping settings
+    reward_shaping: bool = False
+    """Enable reward shaping with betweenness centrality"""
+    shaping_decay_steps: int = 5000
+    """Number of steps to decay reward shaping coefficient"""
+    shaping_coeff: float = 0.1
+    """Initial reward shaping coefficient"""
+
     num_features: int = 16
     """number of initial node features"""
     num_heads: int=4
@@ -106,18 +116,16 @@ class Args:
     valid_dir: str = 'graphs/valid'
 
     # Finetuning directories
-    ft_train_dir: str = 'graphs/train/100_200_SBM_2000'
-    ft_valid_dir: str = 'graphs/valid'
+    ft_train_dir: str = 'graphs/train/50_100_SBM_2000'
+    ft_valid_dir: str = 'graphs/valid/valid_20260104'
 
 def teacher_wrapper(graph, teacher_method='spectral', max_steps=None):
-    from baseline import spectral_dismantling, spectral_dismantling_advance, adaptive_betweenness, random_dismantling
+    from baseline import spectral_dismantling, adaptive_betweenness, random_dismantling
     if teacher_method == 'spectral':
         try:
             removals = spectral_dismantling(graph, max_steps=max_steps)
         except Exception:
             removals = adaptive_betweenness(graph, max_steps=max_steps)
-    elif teacher_method == 'spectral_advanced':
-        removals = spectral_dismantling_advance(graph, max_steps=max_steps)
     elif teacher_method == 'betweenness':
         removals = adaptive_betweenness(graph, max_steps=max_steps)
     else:
@@ -143,11 +151,14 @@ def teacher_step(obs_list, teacher_method='spectral'):
                 obs_next.delete_vertices(0)
         else:
             # Generate teacher action using specified method
-            removals = teacher_wrapper(graph.copy(), teacher_method, max_steps=1)
+            removals = teacher_wrapper(graph, teacher_method, max_steps=1)
             teacher_action = removals[0]
             act_arr[i] = teacher_action
             obs_next = graph.copy()
             obs_next.delete_vertices(teacher_action)
+            
+            # Explicit cleanup of removals list
+            del removals
 
         # Compute reward and done flag (following env.step logic)
         if obs_next.vcount() == 0:
@@ -158,44 +169,53 @@ def teacher_step(obs_list, teacher_method='spectral'):
             lcc_size = max(components.sizes()) if len(components.sizes()) > 0 else 0
             lcc_ratio = lcc_size / max(graph['n_init'], 1)
             done_flag = (lcc_ratio < 0.1 or obs_next.ecount() == 0)
-            rew_arr[i] = -lcc_size / max(graph['n_init'], 1)  # Negative LCC ratio as reward
-            done_arr[i] = done_flag
-            obs_next_list.append(obs_next)
+        
+            # Explicit cleanup of components
+            del components
+        
+        rew_arr[i] = -lcc_size / max(graph['n_init'], 1)  # Negative LCC ratio as reward
+        done_arr[i] = done_flag
+        obs_next_list.append(obs_next)
+        
+        # Periodic garbage collection for large batches
+        if i % 16 == 15:  # Every 16 graphs
+            gc.collect()
             
     return act_arr, obs_next_list, rew_arr, done_arr
 
 
-def get_soft_teacher_distribution_from_removals(graph, removals, temperature=1.0):
+def compute_betweenness_shaping(obs_list, act_arr):
     """
-    Generate soft teacher distribution based on pre-computed removals
+    Compute betweenness centrality based reward shaping
+    Returns normalized betweenness scores for the selected actions
     """
-    if graph.vcount() <= 2:
-        probs = np.ones(graph.vcount()) / graph.vcount()
-        return probs
-    try:
-        # Initialize uniform distribution
-        probs = np.zeros(graph.vcount())
-        
-        # Assign probabilities based on teacher ranking
-        for rank, static_id in enumerate(removals):
-            # Find current index of this node
-            for j, v in enumerate(graph.vs):
-                if v['static_id'] == static_id:
-                    # Exponential decay based on rank (rank 0 = highest priority)
-                    probs[j] = np.exp(-rank / temperature)
-                    break
-        
-        # Normalize to probabilities
-        if probs.sum() > 0:
-            probs = probs / probs.sum()
-        else:
-            # Fallback to uniform if no valid actions found
-            probs = np.ones(graph.vcount()) / graph.vcount()
+    shaping_rewards = np.zeros(len(obs_list), dtype=np.float32)
+    
+    for i, graph in enumerate(obs_list):
+        if graph.vcount() <= 2 or graph.ecount() == 0:
+            shaping_rewards[i] = 0.0
+            continue
             
-    except Exception as e:
-        print(f"Soft teacher distribution failed: {e}")
-        probs = np.ones(graph.vcount()) / graph.vcount()
-    return probs
+        try:
+            # Compute betweenness centrality
+            betweenness = graph.betweenness()
+            if len(betweenness) > 0:
+                # Normalize betweenness scores
+                max_bc = max(betweenness) if max(betweenness) > 0 else 1.0
+                bc_normalized = [bc / max_bc for bc in betweenness]
+                
+                # Get shaping reward for the selected action
+                action_idx = act_arr[i]
+                shaping_rewards[i] = bc_normalized[action_idx]
+
+            else:
+                shaping_rewards[i] = 0.0
+        except Exception as e:
+            print(f"Error while reshaping rewards: {e}")
+            shaping_rewards[i] = 0.0
+    
+    return shaping_rewards
+
 
 if __name__ == "__main__":
     args = tyro.cli(Args)
@@ -206,7 +226,7 @@ if __name__ == "__main__":
     
     now = datetime.now()
     time_string = now.strftime("%Y%m%d_%H%M%S")
-    run_path = f"finetune_{time_string}"
+    run_path = f"finetune_prior_{time_string}"
     device = torch.device(args.device)
 
     random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
@@ -269,11 +289,24 @@ if __name__ == "__main__":
         seed=args.seed
     )
     
-    buffer = FinetuneBuffer(args.buffer_size, device)
+    # Create separate buffers for student and teacher experiences
+    student_buffer = FinetuneBuffer(args.buffer_size // 2, device)
+    teacher_buffer = FinetuneBuffer(args.buffer_size // 2, device)  # Smaller teacher buffer
 
     # Load pretrained network 
     policy, qf1, qf2, qf1_target, qf2_target = load_dismantler(args.num_features, args.num_heads, args.num_mps, device, args.ckpt_pth)
     print(f"Loaded checkpoint for fineturning: {args.ckpt_pth}")
+    
+    # Store original freeze_gnn setting for later restoration
+    original_freeze_gnn = args.freeze_gnn
+    
+
+    # Always freeze GNN during warmup phase (following guide.md step 3)
+    if args.warmup:
+        args.freeze_gnn = True
+        args.demonstrate = True
+        print("---- Freezing GNN during warmup phase (following guide.md)")
+    
     if args.freeze_gnn:
         # Freeze GNN encoder layers, only train MLP
         for param in policy.graph_embedding.parameters():
@@ -292,9 +325,33 @@ if __name__ == "__main__":
         print(f'---- GNN encoder frozen: {frozen_params} parameters')
         print(f'---- MLP trainable: {trainable_params} parameters')
      
+    if args.demonstrate:
+        # colloct teacher demonstration in buffer
+        warmup_graphs = env.graph_data 
+        
+        # Collect teacher experiences in batches
+        for batch_start in range(0, len(warmup_graphs), args.num_envs):
+            batch_end = min(batch_start + args.num_envs, len(warmup_graphs))
+            batch_graphs = warmup_graphs[batch_start:batch_end]
+            
+            # Ensure graphs have n_init attribute
+            for graph in batch_graphs:
+                if 'n_init' not in graph.attributes():
+                    graph['n_init'] = graph.vcount()
+            
+            # Use teacher_step to generate experiences
+            tc_act_arr, tc_obs_next_list, tc_rew_arr, tc_done_arr = teacher_step(
+                batch_graphs, teacher_method=args.teacher_method
+            )
+            
+            # Add to teacher buffer
+            teacher_buffer.add(batch_graphs, tc_act_arr, tc_obs_next_list, tc_rew_arr, tc_done_arr)
+            
+            # Cleanup
+            del tc_act_arr, tc_obs_next_list, tc_rew_arr, tc_done_arr
+
 
     policy_pretrain = None
-    
     if args.distillation:
         # Create pretrain network (frozen for distillation)
         policy_pretrain, _, _, _, _ = load_dismantler(args.num_features, args.num_heads, args.num_mps, device, args.pretrained_ckpt_pth)
@@ -306,7 +363,7 @@ if __name__ == "__main__":
         
         print(f'Loaded pretrained checkpoint: {args.pretrained_ckpt_pth}')
         print(f'---- pretrain policy network frozen with {sum(p.numel() for p in policy_pretrain.parameters())} parameters')
-        print(f'---- Teacher method: {args.teacher_method} (priority-based sampling)')
+        print(f'---- Teacher method: {args.teacher_method} (priority-based sampling: {args.priority_type})')
     
     
     # Setup optimizers with appropriate learning rates
@@ -326,110 +383,145 @@ if __name__ == "__main__":
 
     #### WARMUP PHASE ####
     if args.warmup:
-        from baseline import ensure_static_id
-        print(f"Starting warmup phase for {args.warmup_steps} steps...")
-  
-        # Pre-compute teacher trajectories for all training graphs
-        teacher_trajectories = []
+        warmup_q_optimizer = torch.optim.Adam(q_params, lr=args.warmup_lr, eps=1e-4)
+        warmup_policy_optimizer = torch.optim.Adam(policy_params, lr=args.warmup_lr, eps=1e-4)
         
-        for i, graph in enumerate(env.graph_data[:10]):
-            if i % 100 == 0:
-                print(f"  Processing graph {i}/{len(env.graph_data)}")
-            
-            if graph.vcount() <= 1:
-                continue
-            
-            ensure_static_id(graph)
-            # Get complete teacher solution for trajectory progression
-            removals = teacher_wrapper(graph.copy(), args.teacher_method)
-            trajectory = []
-            temp_graph = graph.copy()
-            
-            for step, removal_static_id in enumerate(removals):
-                vertex_idx =  [i for i, v in enumerate(temp_graph.vs) if v['static_id'] == removal_static_id][0]
-                
-                if args.warmup_soft:
-                    # Generate soft teacher distribution using remaining removals
-                    remaining_removals = removals[step:step+args.warmup_top_k]
-                    soft_probs = get_soft_teacher_distribution_from_removals(
-                        temp_graph, remaining_removals, args.warmup_temperature
-                    )
-                    # Store (state, soft_probs) pair
-                    trajectory.append((temp_graph.copy(), soft_probs))
-                else:
-                    # Store (state, hard_action) pair
-                    trajectory.append((temp_graph.copy(), vertex_idx)) 
-                temp_graph.delete_vertices(vertex_idx)
-            teacher_trajectories.append(trajectory)
+        print(f"Starting warmup phase for {args.warmup_steps} steps, warmup_lr = {args.warmup_lr}...")
         
-        # Warmup training
-        warmup_optimizer = torch.optim.Adam(policy_params, lr=args.warmup_lr, eps=1e-4)
+        # Track best warmup checkpoint
+        warmup_directory = os.path.join('saved', run_path, 'warmup')
+        if not os.path.exists(warmup_directory):
+            os.makedirs(warmup_directory)
+        best_warmup_auc = float('inf')
+        best_warmup_ckpt_path = None
         
         for warmup_step in range(args.warmup_steps):
-            # Sample batch directly from teacher trajectories
-            batch_states = []
-            batch_targets = []
-            for _ in range(args.batch_size):
-                traj_idx = np.random.randint(len(teacher_trajectories))
-                trajectory = teacher_trajectories[traj_idx]
-                if len(trajectory) == 0:
-                    continue
-                # Randomly select a step from this trajectory
-                step_idx = np.random.randint(len(trajectory))
-                state, target = trajectory[step_idx]
-                batch_states.append(state)
-                batch_targets.append(target)
+            samples = teacher_buffer.sample(
+                args.batch_size,
+                use_priority=False,  # No priority during warmup
+                return_indices=False
+            )
+                   
+            obs_b, act_b, obs_next_b, rew_b, done_b = samples
             
-            if len(batch_states) == 0:
-                continue
+            # Update Q-networks (following main loop pattern)
+            with torch.no_grad():
+                _, logp_next_b = policy.get_action(obs_next_b)
                 
-            # Convert to batch format
-            obs_b = Batch(device, [ig_to_data(g) for g in batch_states])
-            # Get student policy logits
+                qf1_next_b = qf1_target(obs_next_b)
+                qf2_next_b = qf2_target(obs_next_b)
+                qf_next_b = torch.min(qf1_next_b, qf2_next_b) - args.alpha * logp_next_b
+                
+                # use E[Q(s',a')|a'] instead of using MC
+                b = obs_next_b.batch[obs_next_b.non_omni_mask]
+                v_next_b = scatter_add(logp_next_b.exp() * qf_next_b, b, dim_size=obs_next_b.batch_size)
+                q_target_b = rew_b.flatten() + (1 - done_b.flatten()) * args.gamma * v_next_b
+                
+                # Explicit cleanup of intermediate tensors
+                del logp_next_b, qf1_next_b, qf2_next_b, qf_next_b, v_next_b
+            
+            # use Q-values only for the taken actions
+            act_b_offset = act_b + obs_b.act_offsets
+            q1_b = qf1(obs_b).gather(0, act_b_offset).flatten()
+            q2_b = qf2(obs_b).gather(0, act_b_offset).flatten()
+            warmup_q_loss = mse_loss(q1_b, q_target_b) + mse_loss(q2_b, q_target_b)
+            
+            # Update Q-networks
+            warmup_q_optimizer.zero_grad()
+            warmup_q_loss.backward()
+            warmup_q_optimizer.step()
+
+            # Update policy
+            # Hard teacher supervision with negative log-likelihood
             _, student_logp_b = policy.get_action(obs_b)
             
-            if args.warmup_soft:
-                # Soft teacher supervision with KL divergence
-                batch_soft_probs = np.concatenate([target for target in batch_targets])  # Shape: [N]
-                teacher_prob_b = torch.tensor(batch_soft_probs, device=device, dtype=torch.float32)
-                
-                # KL divergence loss: KL(teacher || student)
-                warmup_loss = F.kl_div(
-                    student_logp_b,  # Already log probabilities
-                    teacher_prob_b, 
-                    reduction='batchmean'
-                )
-            else:
-                # Hard teacher supervision with negative log-likelihood
-                batch_actions = np.array(batch_targets)
-                teacher_acts_batch = torch.tensor(batch_actions, device=device, dtype=torch.long)
-                # Add action offsets for proper indexing
-                teacher_acts_batch += obs_b.act_offsets
-                
-                # Negative log-likelihood loss
-                warmup_loss = -student_logp_b[teacher_acts_batch].mean()
+            # Convert actions to proper format for indexing
+            teacher_acts_batch = act_b + obs_b.act_offsets
+            
+            # Negative log-likelihood loss
+            warmup_policy_loss = -student_logp_b[teacher_acts_batch].mean()
             
             # Update student policy
-            warmup_optimizer.zero_grad()
-            warmup_loss.backward()
-            warmup_optimizer.step()
+            warmup_policy_optimizer.zero_grad()
+            warmup_policy_loss.backward()
+            warmup_policy_optimizer.step()
             
-            if warmup_step % 100 == 0:
-                print(f"Warmup step {warmup_step}/{args.warmup_steps}, Loss: {warmup_loss.item():.4f}")
+            # Update target networks periodically
+            if warmup_step % args.target_frequency == 0:
+                for param, target_param in zip(qf1.parameters(), qf1_target.parameters()):
+                    target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)
+                for param, target_param in zip(qf2.parameters(), qf2_target.parameters()):
+                    target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)
+            
+            if warmup_step % 10 == 0:
+                # print(f"Warmup step {warmup_step}/{args.warmup_steps}, Policy Loss: {warmup_policy_loss.item():.4f}")
+                print(f"Warmup step {warmup_step}/{args.warmup_steps}, Policy Loss: {warmup_policy_loss.item():.4f}, Q Loss: {warmup_q_loss.item():.4f}")
                 if args.use_tb:
-                    writer.add_scalar("warmup/loss", warmup_loss.item(), warmup_step)
+                    # writer.add_scalar("warmup/policy_loss", warmup_policy_loss.item(), warmup_step)
+                    writer.add_scalar("warmup/warmup_q_loss", warmup_q_loss.item(), warmup_step)
         
-        # Validate student performance after warmup
-        val_auc_list = validate(env_val, policy)[0]
-        auc_val_avg = sum(val_auc_list)/len(val_auc_list)
-        print(f'After warmup, Avg. Validation AUC is {auc_val_avg:.4f}')
-        if args.use_tb:
-            writer.add_scalar("warmup/val_auc", auc_val_avg, args.warmup_steps)
+                # Validate student performance after warmup
+                val_auc_list = validate_with_type_logging(env_val, policy)[0]
+                auc_val_avg = sum(val_auc_list)/len(val_auc_list)
+                print(f'Warmup step {warmup_step}/{args.warmup_steps}, Avg. Validation AUC is {auc_val_avg:.4f}')
+                if args.use_tb:
+                    writer.add_scalar("warmup/val_auc", auc_val_avg, warmup_step)
+                
+                # Save best warmup checkpoint (lower AUC is better)
+                if auc_val_avg < best_warmup_auc:
+                    best_warmup_auc = auc_val_avg
+                    
+                    # Remove previous best checkpoint if exists
+                    if best_warmup_ckpt_path and os.path.exists(best_warmup_ckpt_path):
+                        os.remove(best_warmup_ckpt_path)
+                        print(f"Removed previous best warmup checkpoint: {best_warmup_ckpt_path}")
+                    
+                    # Save new best checkpoint
+                    best_warmup_ckpt_path = os.path.join(warmup_directory, f'warmup_best_step_{warmup_step}_auc_{auc_val_avg:.4f}.ckpt')
+                    torch.save({
+                        "policy_state_dict": policy.state_dict(), 
+                        "qf1_state_dict": qf1.state_dict(),
+                        "qf2_state_dict": qf2.state_dict(),
+                        "qf1_target_state_dict": qf1_target.state_dict(),
+                        "qf2_target_state_dict": qf2_target.state_dict(),
+                        "warmup_step": warmup_step,
+                        "best_auc": auc_val_avg
+                    }, best_warmup_ckpt_path)
+                    print(f"Saved new best warmup checkpoint: {best_warmup_ckpt_path} (AUC: {auc_val_avg:.4f})")
+            
+            # Cleanup batch tensors
+            del obs_b, act_b, obs_next_b, rew_b, done_b
+            del act_b_offset, q1_b, q2_b, q_target_b, warmup_q_loss
+            del student_logp_b, teacher_acts_batch, warmup_policy_loss
         
-        # Clear memory
-        del teacher_trajectories
+        # Clear memory after warmup (keep teacher_trajectories for future development)
+        if 'val_auc_list' in locals():
+            del val_auc_list
         gc.collect()
         torch.cuda.empty_cache() if torch.cuda.is_available() else None
+        
+        # Unfreeze GNN after warmup (following guide.md step 4)
+        if args.warmup and not original_freeze_gnn:
+            print("---- Unfreezing GNN after warmup phase")
+            for param in policy.graph_embedding.parameters():
+                param.requires_grad = True
+            for param in qf1.graph_embedding.parameters():
+                param.requires_grad = True
+            for param in qf2.graph_embedding.parameters():
+                param.requires_grad = True
+            for param in qf1_target.graph_embedding.parameters():
+                param.requires_grad = True
+            for param in qf2_target.graph_embedding.parameters():
+                param.requires_grad = True
+            
+            # Update optimizers to include newly unfrozen parameters
+            q_params = [p for p in list(qf1.parameters()) + list(qf2.parameters()) if p.requires_grad]
+            policy_params = [p for p in policy.parameters() if p.requires_grad]
+            q_optimizer = torch.optim.Adam(q_params, lr=lr, eps=1e-4)
+            policy_optimizer = torch.optim.Adam(policy_params, lr=lr, eps=1e-4)
+            
+            unfrozen_params = sum(p.numel() for p in policy.graph_embedding.parameters())
+            print(f'---- GNN encoder unfrozen: {unfrozen_params} parameters')
 
     #### MAIN LOOP ####
     obs_list, _ = env.reset()
@@ -445,14 +537,36 @@ if __name__ == "__main__":
 
         obs_next_list, rew_arr, done_arr, info_list = env.step(act_arr)
 
-        buffer.add(obs_list, act_arr, obs_next_list, rew_arr, done_arr, is_teacher=False)
+        # Apply reward shaping if enabled (following guide.md)
+        if args.reward_shaping:
+            # Compute decay factor: β(t) starts high and decays to 0
+            decay_progress = min(global_step / args.shaping_decay_steps, 1.0)
+            beta_t = args.shaping_coeff * (1.0 - decay_progress)
+            
+            if beta_t > 0.001:  # Only compute if coefficient is significant
+                # Compute betweenness centrality shaping rewards
+                bc_shaping = compute_betweenness_shaping(obs_list, act_arr)
+                
+                # Apply shaping: R_total = R_LCC + β(t) * BC_norm
+                rew_arr = rew_arr + beta_t * bc_shaping
+                
+                # Log shaping coefficient periodically
+                if global_step % 100 == 0:
+                    print(f"Step {global_step}: Reward shaping β(t) = {beta_t:.4f}")
+                    if args.use_tb:
+                        writer.add_scalar("shaping/beta_coefficient", beta_t, global_step)
+                        writer.add_scalar("shaping/avg_bc_reward", np.mean(bc_shaping), global_step)
+
+        student_buffer.add(obs_list, act_arr, obs_next_list, rew_arr, done_arr)
         
         # When teacher_distill is active, also generate and add teacher experiences
         if args.teacher_distill:
             tc_act_arr, tc_obs_next_list, tc_rew_arr, tc_done_arr = teacher_step(
                 obs_list, teacher_method=args.teacher_method
             )
-            buffer.add(obs_list, tc_act_arr, tc_obs_next_list, tc_rew_arr, tc_done_arr, is_teacher=True)
+            teacher_buffer.add(obs_list, tc_act_arr, tc_obs_next_list, tc_rew_arr, tc_done_arr)
+            # Explicit cleanup of teacher data
+            del tc_act_arr, tc_obs_next_list, tc_rew_arr, tc_done_arr
 
         obs_next_list, _ = env.reset_async(done_arr)
         
@@ -463,7 +577,7 @@ if __name__ == "__main__":
             auc_buffer.append(logger.auc/logger.n_init)
         
         if global_step % args.val_frequency == 0 and global_step >= args.learning_starts:
-            val_auc_list = validate(env_val, policy)[0]
+            val_auc_list = validate_with_type_logging(env_val, policy)[0]
             auc_val_avg = sum(val_auc_list)/len(val_auc_list)
             print(f'At step {global_step}, Avg. Validation AUC is {auc_val_avg:.4f}')
             
@@ -489,12 +603,34 @@ if __name__ == "__main__":
                 writer.add_scalar("train/AUC", auc_avg, global_step)
             
         if global_step > args.learning_starts:
-            for _ in range(args.num_updates):
-                # Sample with priority-based sampling
-                obs_b, act_b, obs_next_b, rew_b, done_b = buffer.sample(
-                    args.batch_size, 
-                    use_priority=True
-                )
+            for update_idx in range(args.num_updates):
+                # Randomly choose which buffer to sample from (70% student, 30% teacher)
+                use_teacher_buffer = (teacher_buffer.ptr > 0 or teacher_buffer.full) and np.random.random() < 0.3
+                
+                if use_teacher_buffer:
+                    # Sample from teacher buffer
+                    samples = teacher_buffer.sample(
+                        args.batch_size,
+                        use_priority=True,
+                        priority=args.priority_type,
+                        return_indices=True
+                    )
+                    buffer_type = 'teacher'
+                else:
+                    # Sample from student buffer
+                    samples = student_buffer.sample(
+                        args.batch_size,
+                        use_priority=True,
+                        priority=args.priority_type,
+                        return_indices=True
+                    )
+                    buffer_type = 'student'
+                
+                if len(samples) == 6:
+                    obs_b, act_b, obs_next_b, rew_b, done_b, sample_indices = samples
+                else:
+                    obs_b, act_b, obs_next_b, rew_b, done_b = samples
+                    sample_indices = None
                 
                 # CRITIC Training
                 with torch.no_grad():
@@ -508,12 +644,25 @@ if __name__ == "__main__":
                     b = obs_next_b.batch[obs_next_b.non_omni_mask]
                     v_next_b = scatter_add(logp_next_b.exp()*qf_next_b, b, dim_size=obs_next_b.batch_size)
                     q_target_b = rew_b.flatten() + (1-done_b.flatten()) * args.gamma * v_next_b
+                    
+                    # Explicit cleanup of intermediate tensors
+                    del logp_next_b, qf1_next_b, qf2_next_b, qf_next_b, v_next_b
                 
                 # use Q-values only for the taken actions
                 act_b += obs_b.act_offsets
                 q1_b = qf1(obs_b).gather(0, act_b).flatten()
                 q2_b = qf2(obs_b).gather(0, act_b).flatten()
                 q_loss = mse_loss(q1_b, q_target_b) + mse_loss(q2_b, q_target_b)
+                
+                # Compute TD-errors for priority buffer update (use Q1 for simplicity)
+                with torch.no_grad():
+                    td_errors = torch.abs(q_target_b - q1_b).cpu().numpy()
+                    # Update TD-errors in the appropriate buffer
+                    if sample_indices is not None:
+                        if buffer_type == 'teacher':
+                            teacher_buffer.update_td_errors(sample_indices, td_errors)
+                        else:
+                            student_buffer.update_td_errors(sample_indices, td_errors)
                 
                 q_optimizer.zero_grad(); q_loss.backward(); q_optimizer.step()
                 
@@ -545,6 +694,9 @@ if __name__ == "__main__":
                     # Combined loss (no teacher distillation loss - handled by priority sampling)
                     enhanced_policy_loss = policy_loss + args.distill_coeff * distill_loss
                     
+                    # Explicit cleanup of distillation tensors
+                    del pretrain_logp_b, student_prob_b, pretrain_prob_b, kl_loss_per_node, kl_loss_per_graph
+                    
                 else:
                     # For transfer_learning and experience_replay, use standard SAC loss
                     enhanced_policy_loss = policy_loss
@@ -552,9 +704,14 @@ if __name__ == "__main__":
                 
                 policy_optimizer.zero_grad(); enhanced_policy_loss.backward(); policy_optimizer.step()
                 
+                # Explicit cleanup of training tensors
+                del obs_b, act_b, obs_next_b, rew_b, done_b
+                if sample_indices is not None:
+                    del sample_indices
+                
                 if args.use_tb and num_updates%args.target_frequency == 0:
                     writer.add_scalar("losses/q1(s,a)", q1_b.mean().item(), global_step)
-                    writer.add_scalar("losses/q2(s,a)", q1_b.mean().item(), global_step)
+                    writer.add_scalar("losses/q2(s,a)", q2_b.mean().item(), global_step)
                     writer.add_scalar("losses/q_loss", q_loss.item() / 2.0, global_step)
                     writer.add_scalar("losses/policy_loss", -policy_loss.item(), global_step)
                     writer.add_scalar("losses/enhanced_policy_loss", -enhanced_policy_loss.item(), global_step)
@@ -569,29 +726,39 @@ if __name__ == "__main__":
                 for param, target_param in zip(qf2.parameters(), qf2_target.parameters()):
                     target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)
 
-            # Add after each training loop iteration
-            if global_step % 100 == 0:  # Periodic cleanup
-                torch.cuda.empty_cache()  # If using CUDA
-                import gc
+            # Additional cleanup for large steps
+            if global_step % 100 == 0:
+                # Clear any lingering references
+                torch.cuda.empty_cache() if torch.cuda.is_available() else None
                 gc.collect()
+                gc.collect()  # Double collection for stubborn references
 # Example usage:
 # Priority-based Finetuning with Spectral Teacher:
 # python sac_finetune_prior.py --use_tb --device cuda:0 --distillation --distill_coeff 0.8 --teacher_method betweenness --teacher_distill
 
-# Option 1 - Priority Distillation (default):
-# python sac_finetune_prior.py --distillation --distill_coeff 0.8
+# Option 1 - LCC Priority Distillation (default):
+# python sac_finetune_prior.py --distillation --distill_coeff 0.8 --priority_type LCC
 
-# Option 2 - Transfer Learning with Priority Buffer:
-# python sac_finetune_prior.py --freeze_gnn 
+# Option 2 - TD-Error Priority Distillation:
+# python sac_finetune_prior.py --distillation --distill_coeff 0.8 --priority_type TDE
 
-# Option 3 - Experience Replay with Priority:
-# python sac_finetune_prior.py --replay --replay_ratio 0.2
+# Option 3 - Difference Priority Distillation:
+# python sac_finetune_prior.py --distillation --distill_coeff 0.8 --priority_type DIFF
 
-# Option 4 - Warmup with Hard Teacher Supervision:
-# python sac_finetune_prior.py --warmup --warmup_steps 1000 --warmup_lr 1e-4 --teacher_method spectral
+# Option 4 - Transfer Learning with Priority Buffer:
+# python sac_finetune_prior.py --freeze_gnn --priority_type TDE
 
-# Option 5 - Warmup with Soft Teacher Supervision:
-# python sac_finetune_prior.py --warmup --warmup_soft --warmup_top_k 5 --warmup_temperature 1.0 --teacher_method spectral
+# Option 5 - Experience Replay with Priority:
+# python sac_finetune_prior.py --replay --replay_ratio 0.2 --priority_type DIFF
+
+# Option 6 - Warmup with Hard Teacher Supervision (GNN frozen during warmup):
+# python sac_finetune_prior.py --warmup --warmup_steps 1000 --warmup_lr 1e-4 --teacher_method spectral --priority_type LCC
+
+# Option 7 - Full Pipeline with Reward Shaping (following guide.md):
+# python sac_finetune_prior.py --warmup --warmup_steps 500 --distillation --reward_shaping --shaping_decay_steps 5000 --shaping_coeff 0.1 --priority_type TDE
+
+# Option 8 - Reward Shaping Only:
+# python sac_finetune_prior.py --reward_shaping --shaping_decay_steps 3000 --shaping_coeff 0.2 --priority_type LCC
 
 # Background execution:
-# nohup python -u sac_finetune_prior.py --use_tb --device cuda:0 --ckpt_pth saved/mind.ckpt --distillation --warmup --warmup_soft > finetune_prior.out 2>&1 &
+# nohup python -u sac_finetune_prior.py --use_tb --device cuda:0 --ckpt_pth saved/mind.ckpt --warmup --distillation --reward_shaping --priority_type TDE > finetune_prior.out 2>&1 &

@@ -15,7 +15,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from env import DismantleEnv
 from networks.dismantle import load_dismantler
-from utils import ReplayBuffer, Batch, validate, ig_to_data
+from utils import FinetuneBuffer, Batch, validate, ig_to_data
 import torch.nn.functional as F
 
 
@@ -34,13 +34,13 @@ class Args:
     """number of training steps (transitions = steps*num_envs), default 200000"""
     buffer_size: int=1000000
     """size of the replay buffer, default 2000000"""
-    batch_size: int=64
+    batch_size: int=16
     """batch size for updating network, default 512"""
     val_frequency: int=200
     """validation frequency, default 1000"""
     save_frequency: int=200
     """save frequency, default 1000"""
-    learning_starts: int= 2000
+    learning_starts: int= 1000
     """timestep to start learning, default 2000"""
     learning_rate: float=3e-5
     """learning rate for the policy and the Q networks, original 3e-4"""
@@ -80,6 +80,14 @@ class Args:
     """Coefficient for teacher method distillation loss (λ2)"""
     teacher_temperature: float = 2.0
     """Temperature for soft probability generation from teacher"""
+    teacher_decay: bool = False
+    """Enable linear decay for teacher coefficient"""
+    decay_rate: float = 0.0001
+    """Decay rate for teacher coefficient linear decay"""
+    
+    # Priority sampling settings
+    priority_type: Optional[str] = None
+    """Priority type for sampling: 'LCC', 'TDE', 'R'"""
     
     num_features: int = 16
     """number of initial node features"""
@@ -95,7 +103,8 @@ class Args:
     valid_dir: str = 'graphs/valid'
 
     # Finetuning directories
-    ft_train_dir: str = 'graphs/train/100_200_SBM_2000'
+    # ft_train_dir: str = 'graphs/train/100_200_SBM_2000'
+    ft_train_dir: str = 'graphs/train/50_100_BR_1000'
     ft_valid_dir: str = 'graphs/valid'
 
 
@@ -285,7 +294,7 @@ if __name__ == "__main__":
         seed=args.seed
     )
     
-    buffer = ReplayBuffer(args.buffer_size, device)
+    buffer = FinetuneBuffer(args.buffer_size, device)
 
     # Load pretrained network 
     policy, qf1, qf2, qf1_target, qf2_target = load_dismantler(args.num_features, args.num_heads, args.num_mps, device, args.ckpt_pth)
@@ -325,6 +334,7 @@ if __name__ == "__main__":
         
         if args.teacher_distill:
             print(f'---- Teacher method: {args.teacher_method}')
+            print(f'---- Priority sampling: {args.priority_type}')
     
     
     # Setup optimizers with appropriate learning rates
@@ -394,7 +404,19 @@ if __name__ == "__main__":
             
         if global_step > args.learning_starts:
             for _ in range(args.num_updates):
-                obs_b, act_b, obs_next_b, rew_b, done_b = buffer.sample(args.batch_size)
+                # Sample from buffer with priority sampling
+                samples = buffer.sample(
+                    args.batch_size,
+                    use_priority=True,
+                    priority=args.priority_type,
+                    return_indices=True
+                )
+                
+                if len(samples) == 6:
+                    obs_b, act_b, obs_next_b, rew_b, done_b, sample_indices = samples
+                else:
+                    obs_b, act_b, obs_next_b, rew_b, done_b = samples
+                    sample_indices = None
                 
                 # CRITIC Training
                 with torch.no_grad():
@@ -415,6 +437,13 @@ if __name__ == "__main__":
                 q2_b = qf2(obs_b).gather(0, act_b).flatten()
                 q_loss = mse_loss(q1_b, q_target_b) + mse_loss(q2_b, q_target_b)
                 
+                # Compute TD-errors for priority buffer update (use Q1 for simplicity)
+                with torch.no_grad():
+                    td_errors = torch.abs(q_target_b - q1_b).cpu().numpy()
+                    # Update TD-errors in buffer
+                    if sample_indices is not None:
+                        buffer.update_td_errors(sample_indices, td_errors)
+                
                 q_optimizer.zero_grad(); q_loss.backward(); q_optimizer.step()
                 
                 # ACTOR Training based on finetuning method
@@ -426,7 +455,7 @@ if __name__ == "__main__":
                     qf2_b = qf2(obs_b)
                 v_b = logp_b.exp()*(args.alpha*logp_b - torch.min(qf1_b, qf2_b))
                 b = obs_b.batch[obs_b.non_omni_mask]
-                rl_loss = scatter_add(v_b, b, dim_size=obs_b.batch_size).mean()
+                policy_loss = scatter_add(v_b, b, dim_size=obs_b.batch_size).mean()
                 
                 if args.distillation:
                     # Multi-teacher distillation loss
@@ -446,8 +475,8 @@ if __name__ == "__main__":
                     kl_loss_per_graph = scatter_add(kl_loss_per_node, b, dim_size=obs_b.batch_size)
                     distill_loss = kl_loss_per_graph.mean()
                     
-                    # Teacher method distillation (learn SBM expertise)
-                    if args.teacher_distill and global_step%5 == 0:
+                    # Teacher method distillation
+                    if args.teacher_distill and num_updates%50 == 0:
                         try:
                             teacher_logp_b = compute_teacher_actions_on_demand(obs_b, args.teacher_method, args.teacher_temperature, device)
                             
@@ -466,23 +495,28 @@ if __name__ == "__main__":
                             teacher_distill_loss = torch.tensor(0.0, device=device)
                     
                     distill_coeff, teacher_coeff = args.distill_coeff, args.teacher_coeff
+                    
+                    # Apply linear decay to teacher coefficient if enabled
+                    if args.teacher_decay:
+                        teacher_coeff = max(0, args.teacher_coeff - global_step * args.decay_rate)
+                    
                     # Combined loss
-                    policy_loss = rl_loss + distill_coeff * distill_loss + teacher_coeff * teacher_distill_loss
+                    enhanced_policy_loss = policy_loss + distill_coeff * distill_loss + teacher_coeff * teacher_distill_loss
                     
                 else:
                     # For transfer_learning and experience_replay, use standard SAC loss
-                    policy_loss = rl_loss
+                    enhanced_policy_loss = policy_loss
                     distill_loss = torch.tensor(0.0, device=device)
                     teacher_distill_loss = torch.tensor(0.0, device=device)
                 
-                policy_optimizer.zero_grad(); policy_loss.backward(); policy_optimizer.step()
+                policy_optimizer.zero_grad(); enhanced_policy_loss.backward(); policy_optimizer.step()
                 
                 if args.use_tb and num_updates%args.target_frequency == 0:
                     writer.add_scalar("losses/q1(s,a)", q1_b.mean().item(), global_step)
-                    writer.add_scalar("losses/q2(s,a)", q1_b.mean().item(), global_step)
+                    writer.add_scalar("losses/q2(s,a)", q2_b.mean().item(), global_step)
                     writer.add_scalar("losses/q_loss", q_loss.item() / 2.0, global_step)
+                    writer.add_scalar("losses/enhanced_policy_loss", -enhanced_policy_loss.item(), global_step)
                     writer.add_scalar("losses/policy_loss", -policy_loss.item(), global_step)
-                    writer.add_scalar("losses/rl_loss", -rl_loss.item(), global_step)
                     if args.distillation:
                         writer.add_scalar("losses/distill_loss", distill_loss.item(), global_step)  # Backward compatibility
                         if args.teacher_distill:
@@ -502,17 +536,21 @@ if __name__ == "__main__":
                 import gc
                 gc.collect()
 # Example usage:
-# Multi-Teacher Distillation with Spectral Method:
-# python sac_finetune.py --use_tb --device cuda:0 --distillation --teacher_distill --teacher_method spectral --distill_coeff 0.5 --teacher_coeff 0.8 --teacher_temperature 2.0
+# Multi-Teacher Distillation with Spectral Method and Priority Sampling:
+# python sac_finetune.py --use_tb --device cuda:0 --distillation --teacher_distill --teacher_method spectral --distill_coeff 0.5 --teacher_coeff 0.8 --teacher_temperature 2.0 --priority_type LCC
+# python sac_finetune.py --use_tb --device cuda:0 --distillation --teacher_distill --teacher_method betweenness --distill_coeff 0.5 --teacher_coeff 0.8 --teacher_temperature 2.0 --priority_type TDE
 
-# Option 1 - Distillation (default):
-# python sac_finetune.py --distillation --distill_coeff 0.5
+# Option 1 - Distillation with LCC Priority (default):
+# python sac_finetune.py --distillation --distill_coeff 0.5 --priority_type LCC
 
-# Option 2 - Transfer Learning (freeze GNN + low LR):
-# python sac_finetune.py  --freeze_gnn --low_lr_factor 0.01
+# Option 2 - Distillation with TD-Error Priority:
+# python sac_finetune.py --distillation --distill_coeff 0.5 --priority_type TDE
 
-# Option 3 - Experience Replay (mix old and new data):
-# python sac_finetune.py --replay --replay_ratio 0.2
+# Option 3 - Transfer Learning with Priority Sampling:
+# python sac_finetune.py --freeze_gnn --priority_type TDE
+
+# Option 4 - Experience Replay with Priority:
+# python sac_finetune.py --replay --replay_ratio 0.2 --priority_type LCC
 
 # Background execution:
-# nohup python -u sac_finetune.py --use_tb --device cuda:0 --ckpt_pth saved/mind.ckpt --distillation > finetune.out 2>&1 &
+# nohup python -u sac_finetune.py --use_tb --device cuda:0 --ckpt_pth saved/mind.ckpt --distillation --priority_type LCC > finetune.out 2>&1 &

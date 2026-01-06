@@ -60,7 +60,7 @@ class FinetuneBuffer():
         self.rew_buffer = np.empty(buffer_size, dtype=np.float32)
         self.done_buffer = np.empty(buffer_size, dtype=bool)
         self.lcc_ratio_buffer = np.empty(buffer_size, dtype=np.float32)
-        self.is_teacher_buffer = np.empty(buffer_size, dtype=bool)  # Track source
+        self.td_error_buffer = np.empty(buffer_size, dtype=np.float32)
         
     def _compute_lcc_ratio(self, obs_list):
         """Compute LCC size ratio (current/original) for each observation"""
@@ -79,7 +79,7 @@ class FinetuneBuffer():
                 lcc_ratios.append(0.5)
         return np.array(lcc_ratios, dtype=np.float32)
     
-    def add(self, obs_list, act_arr, obs_next_list, rew_arr, done_arr, is_teacher=False):
+    def add(self, obs_list, act_arr, obs_next_list, rew_arr, done_arr, td_errors=None):
         """Add experiences to buffer"""
         num_t = len(obs_list)
         lcc_ratios = self._compute_lcc_ratio(obs_list)
@@ -92,21 +92,21 @@ class FinetuneBuffer():
         self.rew_buffer[idx] = rew_arr
         self.done_buffer[idx] = done_arr
         self.lcc_ratio_buffer[idx] = lcc_ratios
-        self.is_teacher_buffer[idx] = is_teacher
+        
+        # Store additional data for TD-error and difference priorities
+        if td_errors is not None:
+            self.td_error_buffer[idx] = td_errors
+        else:
+            self.td_error_buffer[idx] = 0.0  # Default value       
         
         end = self.ptr + num_t
         if end >= self.buffer_size:
             self.full = True
         self.ptr = end % self.buffer_size
     
-    def sample(self, batch_size, use_priority=True,priority='LCC'):
+    def sample(self, batch_size, use_priority=True, priority=None, return_indices=False):
         """
         Sample experiences with optional priority-based sampling
-        
-        Args:
-            batch_size: Number of experiences to sample
-            use_priority: Whether to use priority-based sampling
-            priority: Weight for priority computation
         """
         if self.full:
             available_size = self.buffer_size
@@ -124,15 +124,15 @@ class FinetuneBuffer():
                 lcc_ratios = self.lcc_ratio_buffer[batch_inds]
                 priorities = np.ones(available_size)  # Base priority
                 priorities += lcc_ratios  # LCC bonus (higher LCC = higher priority)
-                # Normalize to probabilities
                 probs = priorities / priorities.sum()
             elif priority == "TDE":
-                # TODO: Implement TD error based priority
-                priorities = np.ones(available_size)
+                # TD-error based priority (absolute difference)
+                td_errors = np.abs(self.td_error_buffer[batch_inds])
+                priorities = td_errors + 1e-6  # Small epsilon to avoid zero priorities
                 probs = priorities / priorities.sum()
-            elif priority == "DIFF":
-                # TODO: Implement difference based priority
-                priorities = np.ones(available_size)
+            elif priority == "R":
+                reward = self.rew_buffer[batch_inds]
+                priorities = reward  # Base priority
                 probs = priorities / priorities.sum()
             else:
                 priorities = np.ones(available_size)
@@ -154,4 +154,12 @@ class FinetuneBuffer():
         rew = torch.tensor(self.rew_buffer[selected_indices], device=self.device, dtype=torch.float32)
         done = torch.tensor(self.done_buffer[selected_indices], device=self.device, dtype=torch.float32)
         
-        return obs, act, obs_next, rew, done
+        if return_indices:
+            return obs, act, obs_next, rew, done, selected_indices
+        else:
+            return obs, act, obs_next, rew, done
+    
+    def update_td_errors(self, indices, td_errors):
+        """Update TD-errors for specific buffer indices"""
+        if len(indices) == len(td_errors):
+            self.td_error_buffer[indices] = td_errors
