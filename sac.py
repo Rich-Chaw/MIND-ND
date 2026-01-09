@@ -13,7 +13,7 @@ from torch.nn.functional import mse_loss
 from torch.utils.tensorboard import SummaryWriter
 
 from env import DismantleEnv
-from networks.dismantle import load_dismantler
+from networks.dismantle import load_sac_dismantler
 from utils import ReplayBuffer, Batch, validate, ig_to_data
 
 
@@ -105,7 +105,7 @@ if __name__ == "__main__":
     
     buffer = ReplayBuffer(args.buffer_size, device)
 
-    policy, qf1, qf2, qf1_target, qf2_target = load_dismantler(args.num_features, args.num_heads, args.num_mps, device, args.ckpt_pth)
+    policy, qf1, qf2, qf1_target, qf2_target = load_sac_dismantler(args.num_features, args.num_heads, args.num_mps, device, args.ckpt_pth)
     q_optimizer = torch.optim.Adam(list(qf1.parameters()) + list(qf2.parameters()), lr=args.learning_rate, eps=1e-4)
     policy_optimizer = torch.optim.Adam(list(policy.parameters()), lr=args.learning_rate, eps=1e-4)
 
@@ -201,7 +201,7 @@ if __name__ == "__main__":
                 
                 if args.use_tb and num_updates%200==0:
                     writer.add_scalar("losses/q1(s,a)", q1_b.mean().item(), global_step)
-                    writer.add_scalar("losses/q2(s,a)", q1_b.mean().item(), global_step)
+                    writer.add_scalar("losses/q2(s,a)", q2_b.mean().item(), global_step)
                     writer.add_scalar("losses/q_loss", q_loss.item() / 2.0, global_step)
                     writer.add_scalar("losses/policy_loss", -policy_loss.item(), global_step)
                     

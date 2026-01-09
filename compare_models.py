@@ -27,10 +27,14 @@ CONFIG = {
         'saved/mind.ckpt',
     ]
 }
-mind_dir = "saved/finetune_prior_20260106_075408"
+mind_dir = "saved/finetune_prior_20260108_214004"
 max_step = 10000
-mind_checkpoints = [os.path.join(mind_dir,p) for p in os.listdir(mind_dir) 
-                        if p.split('.')[0].isdigit() and int(p.split('.')[0]) < max_step]
+gap = 200
+# Get checkpoint files and sort by step number in descending order
+checkpoint_files = [p for p in os.listdir(mind_dir)
+                   if p.split('.')[0].isdigit() and int(p.split('.')[0]) < max_step and (int(p.split('.')[0])+1)%gap == 0]
+checkpoint_files.sort(key=lambda x: int(x.split('.')[0]))
+mind_checkpoints = [os.path.join(mind_dir, p) for p in checkpoint_files]
 CONFIG["mind_checkpoints"].extend(mind_checkpoints)
 # CONFIG["mind_checkpoints"].append('saved/finetune_20251231_163953/warmup/warmup_best_step_130_auc_0.2715.ckpt')
 N_METHODS = len(CONFIG["baseline_methods"]) + len(CONFIG["mind_checkpoints"])

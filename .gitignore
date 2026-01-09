@@ -1,7 +1,9 @@
 *.out
+out/
 *.png
 temp/
 graphs/*.pkl
+graphs/
 .vscode/
 FINDER/
 runs/

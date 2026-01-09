@@ -14,8 +14,8 @@ from torch.nn.functional import mse_loss
 from torch.utils.tensorboard import SummaryWriter
 
 from env import DismantleEnv
-from networks.dismantle import load_dismantler
-from utils import FinetuneBuffer, Batch, validate, ig_to_data
+from networks.dismantle import load_sac_dismantler
+from utils import FinetuneBuffer, Batch, validate,validate_with_type_logging, ig_to_data
 import torch.nn.functional as F
 
 
@@ -32,9 +32,9 @@ class Args:
     """number of parallel environments,default 64"""
     total_steps: int=20000
     """number of training steps (transitions = steps*num_envs), default 200000"""
-    buffer_size: int=1000000
+    buffer_size: int=500000
     """size of the replay buffer, default 2000000"""
-    batch_size: int=16
+    batch_size: int=64
     """batch size for updating network, default 512"""
     val_frequency: int=200
     """validation frequency, default 1000"""
@@ -60,7 +60,7 @@ class Args:
     pretrained_ckpt_pth: Optional[str]='saved/mind.ckpt'
 
     '''options'''
-    distillation: bool=True
+    distillation: bool=False
     distill_coeff: float=0.8
     """distillation coefficient lambda for preventing forgetting (λ1)"""
 
@@ -74,7 +74,7 @@ class Args:
     # Teacher method settings
     teacher_method: str = 'spectral'
     """Teacher method: 'spectral', 'betweenness'"""
-    teacher_distill: bool = True
+    teacher_distill: bool = False
     """Use teacher method distillation"""
     teacher_coeff: float = 0.8
     """Coefficient for teacher method distillation loss (λ2)"""
@@ -88,6 +88,16 @@ class Args:
     # Priority sampling settings
     priority_type: Optional[str] = None
     """Priority type for sampling: 'LCC', 'TDE', 'R'"""
+    
+    # Reward shaping settings
+    reward_shaping: bool = False
+    """Enable reward shaping with KL divergence between teacher and policy"""
+    shaping_method: str = 'KL'
+    """Reward shaping method: 'betweenness' or 'KL'"""
+    shaping_decay_steps: int = 5000
+    """Number of steps to decay reward shaping coefficient"""
+    shaping_coeff: float = 0.1
+    """Initial reward shaping coefficient"""
     
     num_features: int = 16
     """number of initial node features"""
@@ -104,123 +114,11 @@ class Args:
 
     # Finetuning directories
     # ft_train_dir: str = 'graphs/train/100_200_SBM_2000'
-    ft_train_dir: str = 'graphs/train/50_100_BR_1000'
-    ft_valid_dir: str = 'graphs/valid'
+    # ft_train_dir: str = 'graphs/train/50_100_BR_1000'
+    ft_train_dir: str = 'graphs/train/50_100_SBM_2000'
+    ft_valid_dir: str = 'graphs/valid/valid_20260104'
 
-
-def to_soft_probs(graph, removals, current_step, temperature=2.0):
-    """Convert spectral removal sequence to soft probability distribution"""
-    n_nodes = graph.vcount()
-    probs = np.full(n_nodes, 0.01)  # Small background probability
-    
-    # Get next few nodes in sequence
-    remaining_nodes = removals[current_step:]
-    
-    if len(remaining_nodes) > 0:
-        # Primary choice (next node)
-        next_node = remaining_nodes[0]
-        probs[next_node] = 0.6
-        
-        # Secondary choices (next 2-3 nodes)
-        for i, node in enumerate(remaining_nodes[1:4]):  # Next 3 nodes
-            if i < len(remaining_nodes) - 1:
-                probs[node] = 0.2 / (i + 1)  # Decreasing probability
-    
-    # Apply temperature scaling
-    probs = probs ** (1.0 / temperature)
-    
-    # Normalize to sum to 1
-    probs = probs / probs.sum()
-    return probs
-
-
-def batch_to_igraphs(batch):
-    """Convert a Batch object back to list of igraph objects"""
-    graphs = []
-    
-    for i in range(batch.batch_size):
-        # Get nodes and edges for this graph
-        graph_mask = (batch.batch == i)
-        # Remove the omni-node (last node in each graph)
-        graph_nodes = graph_mask.sum().item() - 1
-
-        # Get edges for this graph (excluding omni-node connections)
-        graph_edges = []
-        edge_mask = graph_mask[batch.edge_index[0]] & graph_mask[batch.edge_index[1]]
-        
-        if edge_mask.any():
-            graph_edge_indices = batch.edge_index[:, edge_mask]
-            
-            # Convert global indices to local indices for this graph
-            node_offset = (batch.batch == i).nonzero()[0].item()
-            local_edges = graph_edge_indices - node_offset
-            
-            # Filter out omni-node connections (edges involving the last node)
-            valid_edge_mask = (local_edges[0] < graph_nodes) & (local_edges[1] < graph_nodes)
-            if valid_edge_mask.any():
-                valid_edges = local_edges[:, valid_edge_mask]
-                graph_edges = valid_edges.t().cpu().numpy().tolist()
-        
-        # Create igraph
-        if graph_nodes > 0:
-            g = ig.Graph(n=graph_nodes, edges=graph_edges, directed=False)
-        else:
-            g = ig.Graph(n=1, edges=[], directed=False)  # Minimum graph
-        
-        graphs.append(g)
-    
-    return graphs
-
-def compute_teacher_actions_on_demand(batch, teacher_method='spectral', temperature=2.0, device='cuda'):
-    """
-    Returns teacher log probabilities in the same format as student policy:
-    - Flat tensor [total_non_omni_nodes] matching logp_b from get_action
-    - Uses batch.batch_non_omni for indexing, just like student
-    """
-    from baseline import spectral_dismantling, spectral_dismantling_advance, adaptive_betweenness
-    
-    # Convert batch to igraphs
-    batch_graphs = batch_to_igraphs(batch)
-    
-    # Initialize teacher logprobs for all non-omni nodes
-    num_non_omni_nodes = batch.non_omni_mask.sum().item()
-    teacher_logprobs = torch.full((num_non_omni_nodes,), -float('inf'),dtype=torch.float64, device=device)
-    
-    for i, graph in enumerate(batch_graphs):
-        try:
-            if graph.vcount() <= 2 or graph.ecount() == 0:
-                continue
-            
-            # Try spectral dismantling with max_steps=5
-            if teacher_method in ['spectral']:
-                try:
-                    removal_sequence = spectral_dismantling(graph, max_steps=5)
-                except Exception as e:
-                    removal_sequence = adaptive_betweenness(graph, max_steps=5)
-            elif teacher_method == 'spectral_advanced':
-                removal_sequence = spectral_dismantling_advance(graph, max_steps=5)
-            elif teacher_method == 'betweenness':
-                removal_sequence = adaptive_betweenness(graph, max_steps=5)
-            else:
-                raise ValueError(f"Unknown teacher method: {teacher_method}")
-                
-            # Convert to soft probabilities
-            soft_probs = to_soft_probs(graph, removal_sequence, 0, temperature)
-            
-            # Get indices for this graph's non-omni nodes - use explicit indexing
-            node_mask = (batch.batch_non_omni == i)
-            teacher_probs_tensor = torch.tensor(soft_probs, device=device)
-            teacher_logprobs[node_mask] = torch.log(teacher_probs_tensor + 1e-8)
-
-        except Exception as e:
-            continue
-    
-    import gc
-    del batch_graphs
-    gc.collect()
-    
-    return teacher_logprobs
-
+from finetune_utils import compute_teacher_actions_on_demand, compute_reward_shaping
 
 if __name__ == "__main__":
     args = tyro.cli(Args)
@@ -297,7 +195,7 @@ if __name__ == "__main__":
     buffer = FinetuneBuffer(args.buffer_size, device)
 
     # Load pretrained network 
-    policy, qf1, qf2, qf1_target, qf2_target = load_dismantler(args.num_features, args.num_heads, args.num_mps, device, args.ckpt_pth)
+    policy, qf1, qf2, qf1_target, qf2_target = load_sac_dismantler(args.num_features, args.num_heads, args.num_mps, device, args.ckpt_pth)
     print(f"Loaded checkpoint for fineturning: {args.ckpt_pth}")
     if args.freeze_gnn:
         # Freeze GNN encoder layers, only train MLP
@@ -322,7 +220,7 @@ if __name__ == "__main__":
     
     if args.distillation:
         # Create pretrain network (frozen for distillation)
-        policy_pretrain, _, _, _, _ = load_dismantler(args.num_features, args.num_heads, args.num_mps, device, args.pretrained_ckpt_pth)
+        policy_pretrain, _, _, _, _ = load_sac_dismantler(args.num_features, args.num_heads, args.num_mps, device, args.pretrained_ckpt_pth)
         
         # Freeze pretrain network parameters
         for param in policy_pretrain.parameters():
@@ -366,6 +264,32 @@ if __name__ == "__main__":
 
         obs_next_list, rew_arr, done_arr, info_list = env.step(act_arr)
 
+        # Apply reward shaping if enabled (following guide.md)
+        if args.reward_shaping:
+            # Compute decay factor: β(t) starts high and decays to 0
+            decay_progress = min(global_step / args.shaping_decay_steps, 1.0)
+            beta_t = args.shaping_coeff * (1.0 - decay_progress)
+            
+            if beta_t > 0.001:  # Only compute if coefficient is significant
+                # Compute reward shaping using specified method
+                rew_shaping = compute_reward_shaping(
+                    obs_list, act_arr, 
+                    shaping_method=args.shaping_method,
+                    policy=policy,
+                    teacher_method=args.teacher_method, 
+                    temperature=args.teacher_temperature, 
+                    device=device
+                )
+                rew_arr = rew_arr + beta_t * rew_shaping
+                
+                # Log shaping coefficient periodically
+                if global_step % 100 == 0:
+                    method_name = args.shaping_method.upper()
+                    print(f"Step {global_step}: Reward shaping β(t) = {beta_t:.4f}, avg {method_name} reward = {np.mean(rew_shaping):.4f}")
+                    if args.use_tb:
+                        writer.add_scalar("shaping/beta_coefficient", beta_t, global_step)
+                        writer.add_scalar(f"shaping/{args.shaping_method}_reward_avg", np.mean(rew_shaping), global_step)
+    
         buffer.add(obs_list, act_arr, obs_next_list, rew_arr, done_arr)
 
         obs_next_list, _ = env.reset_async(done_arr)
@@ -377,7 +301,7 @@ if __name__ == "__main__":
             auc_buffer.append(logger.auc/logger.n_init)
         
         if global_step % args.val_frequency == 0 and global_step >= args.learning_starts:
-            val_auc_list = validate(env_val, policy)[0]
+            val_auc_list = validate_with_type_logging(env_val, policy)[0]
             auc_val_avg = sum(val_auc_list)/len(val_auc_list)
             print(f'At step {global_step}, Avg. Validation AUC is {auc_val_avg:.4f}')
             
@@ -412,10 +336,10 @@ if __name__ == "__main__":
                     return_indices=True
                 )
                 
-                if len(samples) == 6:
-                    obs_b, act_b, obs_next_b, rew_b, done_b, sample_indices = samples
+                if len(samples) == 7:
+                    obs_b, act_b, obs_next_b, rew_b, done_b, weights, sample_indices = samples
                 else:
-                    obs_b, act_b, obs_next_b, rew_b, done_b = samples
+                    obs_b, act_b, obs_next_b, rew_b, done_b, weights = samples
                     sample_indices = None
                 
                 # CRITIC Training
@@ -457,11 +381,8 @@ if __name__ == "__main__":
                 b = obs_b.batch[obs_b.non_omni_mask]
                 policy_loss = scatter_add(v_b, b, dim_size=obs_b.batch_size).mean()
                 
+                enhanced_policy_loss = policy_loss
                 if args.distillation:
-                    # Multi-teacher distillation loss
-                    distill_loss = torch.tensor(0.0, device=device)
-                    teacher_distill_loss = torch.tensor(0.0, device=device)
-                    
                     # MIND teacher distillation (prevent forgetting)
                     with torch.no_grad():
                         _, pretrain_logp_b = policy_pretrain.get_action(obs_b)
@@ -474,40 +395,28 @@ if __name__ == "__main__":
                     kl_loss_per_node = pretrain_prob_b * (pretrain_logp_b - logp_b)
                     kl_loss_per_graph = scatter_add(kl_loss_per_node, b, dim_size=obs_b.batch_size)
                     distill_loss = kl_loss_per_graph.mean()
+
+                    enhanced_policy_loss += args.distill_coeff*distill_loss
                     
-                    # Teacher method distillation
-                    if args.teacher_distill and num_updates%50 == 0:
-                        try:
-                            teacher_logp_b = compute_teacher_actions_on_demand(obs_b, args.teacher_method, args.teacher_temperature, device)
-                            
-                            # Same KL divergence computation as MIND distillation
-                            teacher_prob_b = teacher_logp_b.exp()
-                            student_prob_b = logp_b.exp()
-                            
-                            # KL divergence per node, then per graph
-                            teacher_kl_per_node = teacher_prob_b * (teacher_logp_b - logp_b)
-                            teacher_kl_per_graph = scatter_add(teacher_kl_per_node, b, dim_size=obs_b.batch_size)
-                            teacher_distill_loss = teacher_kl_per_graph.mean()
-                            
-                        except Exception as e:
-                            if global_step % 1000 == 0:  # Log occasionally to avoid spam
-                                print(f"Teacher distillation failed: {str(e)}")
-                            teacher_distill_loss = torch.tensor(0.0, device=device)
+                # Teacher method distillation
+                if args.teacher_distill and num_updates%50 == 0:
+                    teacher_logp_b = compute_teacher_actions_on_demand(obs_b, args.teacher_method, args.teacher_temperature, device)
                     
-                    distill_coeff, teacher_coeff = args.distill_coeff, args.teacher_coeff
+                    # Same KL divergence computation as MIND distillation
+                    teacher_prob_b = teacher_logp_b.exp()
+                    student_prob_b = logp_b.exp()
                     
+                    # KL divergence per node, then per graph
+                    teacher_kl_per_node = teacher_prob_b * (teacher_logp_b - logp_b)
+                    teacher_kl_per_graph = scatter_add(teacher_kl_per_node, b, dim_size=obs_b.batch_size)
+                    teacher_distill_loss = teacher_kl_per_graph.mean()
+
                     # Apply linear decay to teacher coefficient if enabled
                     if args.teacher_decay:
                         teacher_coeff = max(0, args.teacher_coeff - global_step * args.decay_rate)
                     
                     # Combined loss
-                    enhanced_policy_loss = policy_loss + distill_coeff * distill_loss + teacher_coeff * teacher_distill_loss
-                    
-                else:
-                    # For transfer_learning and experience_replay, use standard SAC loss
-                    enhanced_policy_loss = policy_loss
-                    distill_loss = torch.tensor(0.0, device=device)
-                    teacher_distill_loss = torch.tensor(0.0, device=device)
+                    enhanced_policy_loss += args.teacher_coeff * teacher_distill_loss
                 
                 policy_optimizer.zero_grad(); enhanced_policy_loss.backward(); policy_optimizer.step()
                 
@@ -519,8 +428,8 @@ if __name__ == "__main__":
                     writer.add_scalar("losses/policy_loss", -policy_loss.item(), global_step)
                     if args.distillation:
                         writer.add_scalar("losses/distill_loss", distill_loss.item(), global_step)  # Backward compatibility
-                        if args.teacher_distill:
-                            writer.add_scalar("losses/teacher_distill_loss", teacher_distill_loss.item(), global_step)
+                    if args.teacher_distill:
+                        writer.add_scalar("losses/teacher_distill_loss", teacher_distill_loss.item(), global_step)
                     
                 num_updates += 1
             
@@ -551,6 +460,12 @@ if __name__ == "__main__":
 
 # Option 4 - Experience Replay with Priority:
 # python sac_finetune.py --replay --replay_ratio 0.2 --priority_type LCC
+
+# Option 5 - Reward Shaping with KL Divergence:
+# python sac_finetune.py --reward_shaping --shaping_method KL --shaping_coeff 0.1 --shaping_decay_steps 5000 --teacher_method spectral --priority_type LCC
+
+# Option 6 - Reward Shaping with Betweenness Centrality:
+# python sac_finetune.py --reward_shaping --shaping_method betweenness --shaping_coeff 0.1 --shaping_decay_steps 5000 --priority_type LCC
 
 # Background execution:
 # nohup python -u sac_finetune.py --use_tb --device cuda:0 --ckpt_pth saved/mind.ckpt --distillation --priority_type LCC > finetune.out 2>&1 &

@@ -7,7 +7,7 @@ from utils.graph_data import Batch
 
 
 
-def load_dismantler(F, H, K, device, ckpt_pth=None):
+def load_sac_dismantler(F, H, K, device, ckpt_pth=None):
     policy = SACPolicy(F, H, K).to(device)
     qf1 = SACQNetwork(F, H, K).to(device)
     qf2 = SACQNetwork(F, H, K).to(device)
@@ -85,3 +85,5 @@ class SACQNetwork(nn.Module):
         e = self.graph_embedding(g)
         q_vals = self.mlp(e).flatten()
         return q_vals
+
+class PPOPolicy(SACPolicy):
