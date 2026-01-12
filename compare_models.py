@@ -13,7 +13,7 @@ import os
 import time
 import warnings
 from baseline import METHODS, evaluate_sol, ensure_attribute
-from graphs.graph_models import SBM, WS
+from utils.graph_models import SBM, WS
 
 warnings.filterwarnings('ignore')
 

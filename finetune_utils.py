@@ -59,27 +59,49 @@ def batch_to_igraphs(batch):
     return graphs
 
 
-def to_soft_probs(graph, action, temperature=2.0, epsilon=0.1):
+def to_soft_probs(graph, current_step ,removals, temperature=1.0, epsilon=0.1):
     """
     Convert teacher action to epsilon-greedy soft probability distribution
     """
+
     n_nodes = graph.vcount()
+    probs = np.full(n_nodes, np.full(n_nodes, epsilon / (n_nodes - 1) if n_nodes > 1 else 0.0))  # Small background probability
     
-    if n_nodes == 0:
-        # If no nodes, return empty array
-        return np.array([])
+    # Get next few nodes in sequence
+    remaining_nodes = removals[current_step+1:]
+    if len(remaining_nodes) > 0:
+        # Primary choice (next node)
+        next_node = remaining_nodes[0]
+        probs[next_node] = 0.7
+        
+        # Secondary choices (next 2-3 nodes)
+        for i, node in enumerate(remaining_nodes[1:4]):  # Next 3 nodes
+            if i < len(remaining_nodes) - 1:
+                probs[node] = 0.3 / (i + 1)  # Decreasing probability
     
-    # Epsilon-greedy distribution
-    optimal_action = action  # a* - the chosen action to remove
-    
-    # Initialize with epsilon probability for non-optimal actions
-    probs = np.full(n_nodes, epsilon / (n_nodes - 1) if n_nodes > 1 else 0.0)
-    
-    # Set optimal action probability
-    if optimal_action < n_nodes:  # Ensure action is valid
-        probs[optimal_action] = 1.0 - epsilon
-    
+    # Apply temperature scaling
+    # probs = np.exp(probs/temperature)
+    probs = probs / probs.sum()
     return probs
+
+
+    # n_nodes = graph.vcount()
+    
+    # if n_nodes == 0:
+    #     # If no nodes, return empty array
+    #     return np.array([])
+    
+    # # Epsilon-greedy distribution
+    # optimal_action = removals[current_step]  # a* - the chosen action to remove
+    
+    # # Initialize with epsilon probability for non-optimal actions
+    # probs = np.full(n_nodes, epsilon / (n_nodes - 1) if n_nodes > 1 else 0.0)
+    
+    # # Set optimal action probability
+    # if optimal_action < n_nodes:  # Ensure action is valid
+    #     probs[optimal_action] = 1.0 - epsilon
+    
+    # return probs
 
 
 def compute_teacher_actions_on_demand(batch, teacher_method='spectral', temperature=2.0, device='cuda'):
@@ -100,9 +122,9 @@ def compute_teacher_actions_on_demand(batch, teacher_method='spectral', temperat
             if graph.vcount() <= 2 or graph.ecount() == 0:
                 continue
             
-            removals = teacher_wrapper(graph, teacher_method, max_steps=1)
+            removals = teacher_wrapper(graph, teacher_method, max_steps=5)
             # Convert to soft probabilities using epsilon-greedy
-            soft_probs = to_soft_probs(graph, removals[0], temperature, epsilon=0.1)
+            soft_probs = to_soft_probs(graph,0, removals, temperature, epsilon=0.1)
             
             # Get indices for this graph's non-omni nodes - use explicit indexing
             node_mask = (batch.batch_non_omni == i)
@@ -169,7 +191,7 @@ def teacher_step(obs_list, teacher_method='spectral'):
     return act_arr, obs_next_list, rew_arr, done_arr
 
 
-def compute_reward_shaping(obs_list, act_arr, shaping_method='betweenness', policy=None, teacher_method='spectral', temperature=2.0, device='cuda'):
+def compute_reward_shaping(obs_list, act_arr, shaping_method='betweenness', policy=None, discriminator=None, teacher_method='spectral', temperature=2.0, device='cuda'):
     """
     Unified reward shaping function supporting multiple methods
     
@@ -194,22 +216,15 @@ def compute_reward_shaping(obs_list, act_arr, shaping_method='betweenness', poli
                 shaping_rewards[i] = 0.0
                 continue
                 
-            try:
-                # Compute betweenness centrality
-                betweenness = graph.betweenness()
-                if len(betweenness) > 0:
-                    # Normalize betweenness scores
-                    max_bc = max(betweenness) if max(betweenness) > 0 else 1.0
-                    bc_normalized = [bc / max_bc for bc in betweenness]
-                    
-                    # Get shaping reward for the selected action
-                    action_idx = act_arr[i]
-                    shaping_rewards[i] = bc_normalized[action_idx]
-                else:
-                    shaping_rewards[i] = 0.0
-            except Exception as e:
-                print(f"Error in betweenness reward shaping: {e}")
-                shaping_rewards[i] = 0.0
+            # Compute betweenness centrality
+            betweenness = graph.betweenness()
+            # Normalize betweenness scores
+            max_bc = max(betweenness) if max(betweenness) > 0 else 1.0
+            bc_normalized = [bc / max_bc for bc in betweenness]
+            
+            # Get shaping reward for the selected action
+            action_idx = act_arr[i]
+            shaping_rewards[i] = bc_normalized[action_idx]
     
     elif shaping_method == 'KL':
         # KL divergence based reward shaping
@@ -245,11 +260,17 @@ def compute_reward_shaping(obs_list, act_arr, shaping_method='betweenness', poli
             # Apply mild clipping to prevent extreme values
             # kl_rewards = np.clip(kl_rewards, -1.0, 1.0)
             shaping_rewards = kl_rewards.astype(np.float32)
-            
+        
         except Exception as e:
             print(f"Error in KL-based reward shaping: {e}")
             shaping_rewards = np.zeros(len(obs_list), dtype=np.float32)
     
+    elif shaping_method == 'POfD':
+        g = Batch(device, [ig_to_data(g) for g in obs_list])
+        e = encoder(g) #[N,2KF]
+        batch_x = e[g.act_offsets + act_arr] 
+        shaping_rewards = discriminator(e)
+
     else:
         print(f"Unknown shaping method: {shaping_method}. Using zero rewards.")
     

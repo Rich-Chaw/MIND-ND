@@ -86,5 +86,5 @@ class MIND(nn.Module):
         x_profile = torch.cat([
             x_profile[g.non_omni_mask],
             x_profile[g.omni_ids[g.batch_non_omni]]
-        ], dim=1)   #(N,2KF) concat(node_embedding, omni_node_embedding)
+        ], dim=1)   #(N,2KF) concat(node_embedding, omni_node_embedding/graph_embedding)
         return x_profile

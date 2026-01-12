@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from torch_scatter import scatter_log_softmax, scatter_max
+from torch_scatter import scatter_log_softmax, scatter_max, scatter_mean
 
 from networks.mind import MIND
 from utils.graph_data import Batch
@@ -87,3 +87,46 @@ class SACQNetwork(nn.Module):
         return q_vals
 
 class PPOPolicy(SACPolicy):
+    pass
+
+
+class PPOVNetwork(nn.Module):
+    def __init__(self, num_features, num_heads, num_mps):
+        super().__init__()
+        self.graph_embedding = MIND(num_features, num_heads, num_mps)
+        # Extract only the graph embedding part (second half)
+        e_size = num_features * num_mps
+
+        self.mlp = nn.Sequential(
+            nn.Linear(e_size, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 1)
+        )
+    
+    def forward(self, g: Batch):
+        e = self.graph_embedding(g)  # [N, 2KF]
+        # Extract only the graph embedding part (second half)
+        graph_e = e[:, e.shape[1]//2:]  # [N, KF]
+        node_values = self.mlp(graph_e).flatten()  # [N]
+        v_vals = scatter_mean(node_values, g.batch_non_omni, dim_size=g.batch_size) #[B]
+        return v_vals
+
+
+class PPOQNetwork(SACQNetwork):
+    pass
+
+
+def load_ppo_dismantler(F, H, K, device, ckpt_pth=None):
+    policy = PPOPolicy(F, H, K).to(device)
+    vf = PPOVNetwork(F, H, K).to(device)
+    qf = PPOQNetwork(F, H, K).to(device)
+    
+    if ckpt_pth is not None:
+        ckpt = torch.load(ckpt_pth)
+        policy.load_state_dict(ckpt['policy_state_dict'])
+        vf.load_state_dict(ckpt['vf_state_dict'])
+        qf.load_state_dict(ckpt['qf_state_dict'])
+    
+    return policy, vf, qf

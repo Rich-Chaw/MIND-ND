@@ -15,7 +15,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from env import DismantleEnv
 from networks.dismantle import load_sac_dismantler
-from utils import ReplayBuffer, FinetuneBuffer, Batch, validate, validate_with_type_logging, ig_to_data
+from utils import ReplayBuffer, FinetuneBuffer, Batch, validate, validate_with_type_logging, ig_to_data, Discriminator, train_discriminator, DiscriminatorDataset
 import torch.nn.functional as F
 import gc
 
@@ -33,7 +33,7 @@ class Args:
     """number of parallel environments,default 64"""
     total_steps: int=20000
     """number of training steps (transitions = steps*num_envs), default 200000"""
-    buffer_size: int=1000000
+    buffer_size: int=500000
     """size of the replay buffer, default 2000000"""
     batch_size: int=64
     """batch size for updating network, default 512"""
@@ -43,7 +43,7 @@ class Args:
     """save frequency, default 1000"""
     learning_starts: int= 1000
     """timestep to start learning, default 2000"""
-    learning_rate: float=3e-4
+    learning_rate: float=1e-4
     """learning rate for the policy and the Q networks, original 3e-4"""
     tau: float=1.0
     """target smoothing factor,default 1.0"""
@@ -51,12 +51,12 @@ class Args:
     """intensity of entropy regularization"""
     gamma: float=0.99
     """Discount factor"""
-    num_updates: int=20
+    num_updates: int=12
     """number of network updates at each step, original 16"""
     target_frequency: int=50
     """the frequency for updating the target networks, default 200"""
 
-    ckpt_pth: Optional[str]='saved/mind.ckpt'
+    ckpt_pth: Optional[str]=None
     """where ckeckpoint was saved"""
     pretrained_ckpt_pth: Optional[str]='saved/mind.ckpt'
 
@@ -80,11 +80,12 @@ class Args:
     
     # Priority sampling settings
     priority_type: Optional[str] = None
-    """Priority type for sampling: 'LCC', 'TDE', 'R', 'TEACHER', 'DDQNfD'"""
+    """Priority type for sampling: 'LCC', 'TDE', 'R', 'TEACHER', 'DDPGfD'"""
     
     # demeonstration setting
     demonstrate: bool = False
     """Save demonstation in teacher buffer before training"""
+    num_demos: int = 1000
 
     # Warmup settings
     warmup: bool = False
@@ -94,9 +95,12 @@ class Args:
     warmup_lr: float = 3e-5
     """Learning rate for warmup phase"""
     
+    discriminator: bool = False
+    discriminator_train_frequency: int = 50
+
     # Reward shaping settings
     reward_shaping: bool = False
-    """Enable reward shaping with betweenness centrality or KL divergence"""
+    """Enable reward shaping"""
     shaping_method: str = 'KL'
     """Reward shaping method: 'betweenness' or 'KL'"""
     shaping_decay_steps: int = 5000
@@ -198,9 +202,7 @@ if __name__ == "__main__":
         seed=args.seed
     )
     
-    # Create separate buffers for student and teacher experiences
-    student_buffer = FinetuneBuffer(args.buffer_size // 2, device)
-    teacher_buffer = FinetuneBuffer(args.buffer_size // 2, device)  # Smaller teacher buffer
+    buffer = FinetuneBuffer(args.buffer_size, device)
 
     # Load pretrained network 
     policy, qf1, qf2, qf1_target, qf2_target = load_sac_dismantler(args.num_features, args.num_heads, args.num_mps, device, args.ckpt_pth)
@@ -235,29 +237,29 @@ if __name__ == "__main__":
         print(f'---- MLP trainable: {trainable_params} parameters')
      
     if args.demonstrate:
-        # colloct teacher demonstration in buffer
-        warmup_graphs = env.graph_data
-        
-        # Collect teacher experiences in batches
-        for batch_start in range(0, len(warmup_graphs), args.num_envs):
-            batch_end = min(batch_start + args.num_envs, len(warmup_graphs))
-            batch_graphs = warmup_graphs[batch_start:batch_end]
+        obs_list, _ = env.reset()
+        num_eps = 0
+        while num_eps < args.num_demos:
+            act_arr = []
+            for graph in obs_list:
+                removals = teacher_wrapper(graph, args.teacher_method, max_steps=1)
+                teacher_action = removals[0]
+                act_arr.append(teacher_action)
             
-            # Ensure graphs have n_init attribute
-            for graph in batch_graphs:
-                if 'n_init' not in graph.attributes():
-                    graph['n_init'] = graph.vcount()
-            
-            # Use teacher_step to generate experiences
-            tc_act_arr, tc_obs_next_list, tc_rew_arr, tc_done_arr = teacher_step(
-                batch_graphs, teacher_method=args.teacher_method
-            )
-            
+            obs_next_list, rew_arr, done_arr, info_list = env.step(np.array(act_arr))
+                
             # Add to teacher buffer
-            student_buffer.add(batch_graphs, tc_act_arr, tc_obs_next_list, tc_rew_arr, tc_done_arr, from_teacher=True)
-            
-            # Cleanup
-            del tc_act_arr, tc_obs_next_list, tc_rew_arr, tc_done_arr
+            buffer.add(obs_list, act_arr, obs_next_list, rew_arr, done_arr, from_teacher=True,fixed=True)
+            num_eps += len(info_list)
+
+            obs_next_list, _ = env.reset_async(done_arr)
+            obs_list = obs_next_list
+
+        # Cleanup
+        del act_arr, obs_next_list, rew_arr, done_arr
+        
+        # log buffer size
+        print(f"Saved {buffer.ptr} transitions from demonstration in buffer")
 
 
     policy_pretrain = None
@@ -285,6 +287,10 @@ if __name__ == "__main__":
     
     q_optimizer = torch.optim.Adam(q_params, lr=lr, eps=1e-4)
     policy_optimizer = torch.optim.Adam(policy_params, lr=lr, eps=1e-4)
+    
+    if args.discriminator:
+        discriminator = Discriminator(2 * args.num_features * args.num_mps).to(device)
+        print(f"Initialized discriminator with embedding size: {args.num_features * args.num_mps}")
 
     num_eps, num_updates = 0, 0
     auc_buffer = deque(maxlen=20)
@@ -305,9 +311,8 @@ if __name__ == "__main__":
         best_warmup_ckpt_path = None
         
         for warmup_step in range(args.warmup_steps):
-            samples = teacher_buffer.sample(
+            samples = buffer.sample(
                 args.batch_size,
-                use_priority=False,  # No priority during warmup
                 return_indices=False
             )
                    
@@ -464,7 +469,7 @@ if __name__ == "__main__":
                     shaping_method=args.shaping_method,
                     policy=policy,
                     teacher_method=args.teacher_method,
-                    temperature=2.0,
+                    temperature=1.0,
                     device=device
                 )
                 
@@ -477,14 +482,14 @@ if __name__ == "__main__":
                         writer.add_scalar("shaping/beta_coefficient", beta_t, global_step)
                         writer.add_scalar(f"shaping/{args.shaping_method.lower()}_reward_avg", np.mean(rew_shaping), global_step)
 
-        student_buffer.add(obs_list, act_arr, obs_next_list, rew_arr, done_arr, from_teacher=False)
+        buffer.add(obs_list, act_arr, obs_next_list, rew_arr, done_arr, from_teacher=False)
         
         # When teacher_distill is active, also generate and add teacher experiences
         if args.teacher_distill:
             tc_act_arr, tc_obs_next_list, tc_rew_arr, tc_done_arr = teacher_step(
                 obs_list, teacher_method=args.teacher_method
             )
-            teacher_buffer.add(obs_list, tc_act_arr, tc_obs_next_list, tc_rew_arr, tc_done_arr, from_teacher=False) # set from_teacher=False to forgetting
+            buffer.add(obs_list, tc_act_arr, tc_obs_next_list, tc_rew_arr, tc_done_arr, from_teacher=True) 
             # Explicit cleanup of teacher data
             del tc_act_arr, tc_obs_next_list, tc_rew_arr, tc_done_arr
 
@@ -515,37 +520,48 @@ if __name__ == "__main__":
                 "qf2_target_state_dict": qf2_target.state_dict()
                 }, os.path.join(directory, f'{global_step}.ckpt'))
             
-        if (global_step + 1) % 50 == 0:
+        if (global_step + 1) % 50 == 0: #log train AUC
             time_relative = str(timedelta(seconds=time.time() - start_time)).split('.')[0]
             auc_avg = sum(auc_buffer)/len(auc_buffer)
             print(f"[{time_relative} | {num_eps} episodes | {global_step} steps] Avg. AUC = {auc_avg:.3f} (Priority Finetuning)")
             if args.use_tb:
                 writer.add_scalar("train/AUC", auc_avg, global_step)
-            
+
+        if args.discriminator and (global_step + 1) % args.discriminator_train_frequency == 0 and global_step > args.learning_starts:
+            # Sample experiences with tags to identify teacher vs student
+            samples = buffer.sample(2000, return_tags=True)
+            if samples is not None and len(samples) >= 7:
+                obs_b, act_b, obs_next_b, rew_b, done_b, weights, tags = samples
+                # Convert tags to binary labels (1=teacher, 0=student)
+                labels = tags.cpu().numpy().astype(np.float32)
+                # Create dataset for discriminator training
+                dataset = DiscriminatorDataset(obs_b, act_b, labels, seed=args.seed, device=device)
+                
+                # Train discriminator
+                avg_loss = train_discriminator(
+                    dataset, 
+                    discriminator, 
+                    encoder = policy.graph_embedding,
+                    batch_size=64, 
+                    num_epochs=5, 
+                    lr=0.001
+                )   
+                if args.use_tb and avg_loss is not None:
+                    writer.add_scalar("discriminator/loss", avg_loss, global_step)
+                
+                print(f"Step {global_step}: Trained discriminator, avg loss: {avg_loss:.4f}")
+                
+                # Cleanup
+                del obs_b, act_b, obs_next_b, rew_b, done_b, weights, tags
+                del embeddings, labels, dataset
+
         if global_step > args.learning_starts:
             for update_idx in range(args.num_updates):
-                # Randomly choose which buffer to sample from (70% student, 30% teacher)
-                use_teacher_buffer = (teacher_buffer.ptr > 0 or teacher_buffer.full) and np.random.random() < 0.3
-                
-                if use_teacher_buffer:
-                    # Sample from teacher buffer
-                    samples = teacher_buffer.sample(
-                        args.batch_size,
-                        use_priority=True,
-                        priority=args.priority_type,
-                        # priority="TDE",
-                        return_indices=True
-                    )
-                    buffer_type = 'teacher'
-                else:
-                    # Sample from student buffer
-                    samples = student_buffer.sample(
-                        args.batch_size,
-                        use_priority=True,
-                        priority=args.priority_type,
-                        return_indices=True
-                    )
-                    buffer_type = 'student'
+                samples = buffer.sample(
+                    args.batch_size,
+                    priority=args.priority_type,
+                    return_indices=True
+                )
                 
                 if len(samples) == 7:
                     obs_b, act_b, obs_next_b, rew_b, done_b, weights, sample_indices = samples
@@ -589,10 +605,7 @@ if __name__ == "__main__":
                     td_errors = torch.abs(q_target_b - q1_b).cpu().numpy()
                     # Update TD-errors in the appropriate buffer
                     if sample_indices is not None:
-                        if buffer_type == 'teacher':
-                            teacher_buffer.update_td_errors(sample_indices, td_errors)
-                        else:
-                            student_buffer.update_td_errors(sample_indices, td_errors)
+                        buffer.update_td_errors(sample_indices, td_errors)
                 
                 q_optimizer.zero_grad(); q_loss.backward(); q_optimizer.step()
                 
@@ -610,8 +623,8 @@ if __name__ == "__main__":
                 policy_loss_per_graph = scatter_add(v_b, b, dim_size=obs_b.batch_size)
                 policy_loss = (weights * policy_loss_per_graph).mean()
                 
-                # Compute policy gradient norm for DDQNfD priority update (after backward pass)
-                if args.priority_type == "DDQNfD" and sample_indices is not None:
+                # Compute policy gradient norm for DDPGfD priority update (after backward pass)
+                if sample_indices is not None:
                     # Capture gradient norm after backward pass (more efficient)
                     policy_grad_norm = 0.0
                     for param in policy.parameters():
@@ -622,10 +635,7 @@ if __name__ == "__main__":
                     
                     # Update policy gradient norms in buffer
                     policy_grad_norms = np.full(len(sample_indices), policy_grad_norm, dtype=np.float32)
-                    if buffer_type == 'teacher':
-                        teacher_buffer.update_policy_grad_norms(sample_indices, policy_grad_norms)
-                    else:
-                        student_buffer.update_policy_grad_norms(sample_indices, policy_grad_norms)
+                    buffer.update_policy_grad_norms(sample_indices, policy_grad_norms)
                 
                 if args.distillation:
                     # MIND teacher distillation (prevent forgetting)
@@ -697,14 +707,14 @@ if __name__ == "__main__":
 # Option 2 - TD-Error Priority Distillation:
 # python sac_finetune_prior.py --distillation --distill_coeff 0.8 --priority_type TDE
 
-# Option 3 - DDQNfD Priority with Importance Sampling:
-# python sac_finetune_prior.py --distillation --priority_type DDQNfD --ddqnfd_lambda 1.0 --ddqnfd_teacher_bonus 1.0 --ddqnfd_beta 0.4
+# Option 3 - DDPGfD Priority with Importance Sampling:
+# python sac_finetune_prior.py --distillation --priority_type DDPGfD --DDPGfD_lambda 1.0 --DDPGfD_teacher_bonus 1.0 --DDPGfD_beta 0.4
 
 # Option 4 - Transfer Learning with Priority Buffer:
 # python sac_finetune_prior.py --freeze_gnn --priority_type TDE
 
 # Option 5 - Experience Replay with Priority:
-# python sac_finetune_prior.py --replay --replay_ratio 0.2 --priority_type DDQNfD
+# python sac_finetune_prior.py --replay --replay_ratio 0.2 --priority_type DDPGfD
 
 # Option 6 - Warmup with Hard Teacher Supervision (GNN frozen during warmup):
 # python sac_finetune_prior.py --warmup --warmup_steps 1000 --warmup_lr 1e-4 --teacher_method spectral --priority_type LCC
@@ -716,5 +726,5 @@ if __name__ == "__main__":
 # python sac_finetune_prior.py --reward_shaping --shaping_method KL --teacher_method spectral --shaping_coeff 0.1 --shaping_decay_steps 5000
 
 
-# Background execution with DDQNfD:
-# nohup python -u sac_finetune_prior.py --use_tb --device cuda:0 --ckpt_pth saved/mind.ckpt --demonstrate --teacher_method betweenness --priority_type DDQNfD --regularization > finetune_ddqnfd.out 2>&1 &
+# Background execution with DDPGfD:
+# nohup python -u sac_finetune_prior.py --use_tb --device cuda:0 --ckpt_pth saved/mind.ckpt --demonstrate --teacher_method betweenness --priority_type DDPGfD --regularization > finetune_DDPGfD.out 2>&1 &

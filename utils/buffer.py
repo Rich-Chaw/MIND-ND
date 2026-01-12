@@ -85,16 +85,17 @@ class FinetuneBuffer():
                     current_lcc_size = max(components.sizes()) if len(components.sizes()) > 0 else 0
                 ratio = current_lcc_size / max(n_init, 1)
                 lcc_ratios.append(ratio)
-            except:
+            except Exception as e:
+                print(f"error {e} in buffer lcc!")
                 lcc_ratios.append(0.5)
         return np.array(lcc_ratios, dtype=np.float32)
     
-    def add(self, obs_list, act_arr, obs_next_list, rew_arr, done_arr, td_errors=None, from_teacher=False, policy_grad_norms=None):
+    def add(self, obs_list, act_arr, obs_next_list, rew_arr, done_arr, td_errors=None, from_teacher=False, policy_grad_norms=None, fixed=False):
         """Add experiences to buffer with permanent teacher storage"""
         num_t = len(obs_list)
         lcc_ratios = self._compute_lcc_ratio(obs_list)
         
-        if from_teacher:
+        if fixed:
             # Store teacher experiences permanently starting from fix_ptr
             idx = np.arange(self.fix_ptr, self.fix_ptr + num_t)
             if self.fix_ptr + num_t > self.buffer_size:
@@ -141,7 +142,7 @@ class FinetuneBuffer():
         else:
             self.policy_grad_norm_buffer[idx] = 0.0
     
-    def sample(self, batch_size, use_priority=True, priority=None, return_indices=False):
+    def sample(self, batch_size, priority=None, return_indices=False, return_tags=False):
         """
         Sample experiences with optional priority-based sampling and importance sampling weights
         """
@@ -153,11 +154,11 @@ class FinetuneBuffer():
             batch_inds = np.arange(self.ptr)
         
         if available_size == 0:
-            return None, None, None, None, None, None
+            return None
         
         weights = None  # Initialize weights
         
-        if use_priority and available_size > 0:
+        if available_size > 0:
             # Compute priorities
             if priority == "LCC":
                 lcc_ratios = self.lcc_ratio_buffer[batch_inds]
@@ -170,8 +171,8 @@ class FinetuneBuffer():
             elif priority == "R":
                 reward = self.rew_buffer[batch_inds]
                 priorities = reward + self.epsilon  # Base priority
-            elif priority == "DDQNfD":
-                # DDQNfD priority: P(i) = |TD_error| + λ*||∇policy|| + D_t + ε
+            elif priority == "DDPGfD":
+                # DDPGfD priority: P(i) = |TD_error| + λ*||∇policy|| + D_t + ε
                 td_errors = np.abs(self.td_error_buffer[batch_inds])
                 policy_grad_norms = self.policy_grad_norm_buffer[batch_inds]
                 teacher_bonus_arr = self.from_teacher_buffer[batch_inds].astype(np.float32) * self.teacher_bonus
@@ -199,24 +200,21 @@ class FinetuneBuffer():
             else:
                 weights = torch.ones(len(selected_indices), device=self.device, dtype=torch.float32)
 
-        else:
-            # Uniform random sampling (like original ReplayBuffer)
-            if self.full:
-                selected_indices = (np.random.randint(1, self.buffer_size, size=batch_size) + self.ptr) % self.buffer_size
-            else:
-                selected_indices = np.random.randint(0, self.ptr, size=batch_size)
-            weights = torch.ones(len(selected_indices), device=self.device, dtype=torch.float32)
-
         obs = Batch(self.device, self.obs_buffer[selected_indices].tolist())
         obs_next = Batch(self.device, self.obs_next_buffer[selected_indices].tolist())
         act = torch.tensor(self.act_buffer[selected_indices], device=self.device, dtype=torch.long)
         rew = torch.tensor(self.rew_buffer[selected_indices], device=self.device, dtype=torch.float32)
         done = torch.tensor(self.done_buffer[selected_indices], device=self.device, dtype=torch.float32)
         
+        samples = [obs, act, obs_next, rew, done, weights]
+        
         if return_indices:
-            return obs, act, obs_next, rew, done, weights, selected_indices
-        else:
-            return obs, act, obs_next, rew, done, weights
+            samples.append(selected_indices)
+        if return_tags:
+            tags = torch.tensor(self.from_teacher_buffer[selected_indices], device=self.device, dtype=torch.float32)
+            samples.append(tags)
+            
+        return samples
     
     def update_td_errors(self, indices, td_errors):
         """Update TD-errors for specific buffer indices"""
