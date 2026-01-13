@@ -168,9 +168,6 @@ class FinetuneBuffer():
                 # TD-error based priority (absolute difference)
                 td_errors = np.abs(self.td_error_buffer[batch_inds])
                 priorities = td_errors + self.epsilon  # Small epsilon to avoid zero priorities
-            elif priority == "R":
-                reward = self.rew_buffer[batch_inds]
-                priorities = reward + self.epsilon  # Base priority
             elif priority == "DDPGfD":
                 # DDPGfD priority: P(i) = |TD_error| + λ*||∇policy|| + D_t + ε
                 td_errors = np.abs(self.td_error_buffer[batch_inds])
@@ -225,4 +222,85 @@ class FinetuneBuffer():
         """Update policy gradient norms for specific buffer indices"""
         if len(indices) == len(policy_grad_norms):
             self.policy_grad_norm_buffer[indices] = policy_grad_norms
+
+class RolloutBuffer:
+    """
+    Buffer for storing complete trajectories (episodes) for PPO training.
+    Each trajectory contains a sequence of transitions until episode termination.
+    """
+    def __init__(self, device):
+        self.device = device
+        self.trajectories = []  # List of trajectories, each is a dict with lists of transitions
+        
+    def add_trajectory(self, obs_list, act_list, rew_list, obs_next_list, done_list):
+        """
+        Add a complete trajectory to the buffer.
+        
+        Args:
+            obs_list: List of observations (igraph graphs) for the trajectory
+            act_list: List of actions (numpy array or list)
+            rew_list: List of rewards (numpy array or list)
+            obs_next_list: List of next observations (igraph graphs)
+            done_list: List of done flags (numpy array or list)
+        """
+        trajectory = {
+            'obs': obs_list,
+            'act': act_list,
+            'rew': rew_list,
+            'obs_next': obs_next_list,
+            'done': done_list
+        }
+        self.trajectories.append(trajectory)
+    
+    def sample_trajectories(self, batch_size):
+        """
+        Sample a batch of trajectories from the buffer.
+        
+        Args:
+            batch_size: Number of trajectories to sample
+            
+        Returns:
+            List of trajectory dictionaries, each containing:
+            - obs: Batch object
+            - act: torch.Tensor of actions
+            - rew: torch.Tensor of rewards
+            - obs_next: Batch object
+            - done: torch.Tensor of done flags
+        """
+        if len(self.trajectories) == 0:
+            return []
+        
+        # Sample trajectories with replacement
+        num_trajs = min(batch_size, len(self.trajectories))
+        indices = np.random.choice(len(self.trajectories), size=num_trajs, replace=True)
+        
+        sampled_trajs = []
+        for idx in indices:
+            traj = self.trajectories[idx]
+            
+            # Convert to tensors and Batch objects
+            obs_batch = Batch(self.device, [ig_to_data(g) for g in traj['obs']])
+            obs_next_batch = Batch(self.device, [ig_to_data(g) for g in traj['obs_next']])
+            act_tensor = torch.tensor(traj['act'], device=self.device, dtype=torch.long)
+            rew_tensor = torch.tensor(traj['rew'], device=self.device, dtype=torch.float32)
+            done_tensor = torch.tensor(traj['done'], device=self.device, dtype=torch.float32)
+            
+            sampled_trajs.append({
+                'obs': obs_batch,
+                'act': act_tensor,
+                'rew': rew_tensor,
+                'obs_next': obs_next_batch,
+                'done': done_tensor
+            })
+        
+        return sampled_trajs
+    
+    def clear(self):
+        """Clear all trajectories from the buffer."""
+        self.trajectories = []
+    
+    def size(self):
+        """Return the number of trajectories in the buffer."""
+        return len(self.trajectories)
+    
     

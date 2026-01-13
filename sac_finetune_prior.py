@@ -210,8 +210,6 @@ if __name__ == "__main__":
     
     # Store original freeze_gnn setting for later restoration
     original_freeze_gnn = args.freeze_gnn
-    
-
     # Always freeze GNN during warmup phase (following guide.md step 3)
     if args.warmup:
         args.freeze_gnn = True
@@ -288,9 +286,8 @@ if __name__ == "__main__":
     q_optimizer = torch.optim.Adam(q_params, lr=lr, eps=1e-4)
     policy_optimizer = torch.optim.Adam(policy_params, lr=lr, eps=1e-4)
     
-    if args.discriminator:
-        discriminator = Discriminator(2 * args.num_features * args.num_mps).to(device)
-        print(f"Initialized discriminator with embedding size: {args.num_features * args.num_mps}")
+    discriminator = Discriminator(2 * args.num_features * args.num_mps).to(device)
+    print(f"Initialized discriminator with embedding size: {2 * args.num_features * args.num_mps}")
 
     num_eps, num_updates = 0, 0
     auc_buffer = deque(maxlen=20)
@@ -468,6 +465,7 @@ if __name__ == "__main__":
                     obs_list, act_arr,
                     shaping_method=args.shaping_method,
                     policy=policy,
+                    discriminator=discriminator,
                     teacher_method=args.teacher_method,
                     temperature=1.0,
                     device=device
@@ -535,7 +533,9 @@ if __name__ == "__main__":
                 # Convert tags to binary labels (1=teacher, 0=student)
                 labels = tags.cpu().numpy().astype(np.float32)
                 # Create dataset for discriminator training
-                dataset = DiscriminatorDataset(obs_b, act_b, labels, seed=args.seed, device=device)
+                from finetune_utils import batch_to_igraphs
+                graphs = batch_to_igraphs(obs_b)
+                dataset = DiscriminatorDataset(graphs, act_b, labels, seed=args.seed, device=device)
                 
                 # Train discriminator
                 avg_loss = train_discriminator(
@@ -553,7 +553,7 @@ if __name__ == "__main__":
                 
                 # Cleanup
                 del obs_b, act_b, obs_next_b, rew_b, done_b, weights, tags
-                del embeddings, labels, dataset
+                del labels, dataset
 
         if global_step > args.learning_starts:
             for update_idx in range(args.num_updates):

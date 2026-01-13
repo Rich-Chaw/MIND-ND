@@ -267,7 +267,7 @@ def compute_reward_shaping(obs_list, act_arr, shaping_method='betweenness', poli
     
     elif shaping_method == 'POfD':
         g = Batch(device, [ig_to_data(g) for g in obs_list])
-        e = encoder(g) #[N,2KF]
+        e = policy.graph_embedding(g) #[N,2KF]
         batch_x = e[g.act_offsets + act_arr] 
         shaping_rewards = discriminator(e)
 

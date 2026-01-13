@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+import random
 from utils import Batch, ig_to_data
 
 class Discriminator(nn.Module):
@@ -23,33 +24,40 @@ class Discriminator(nn.Module):
         return self.net(e).squeeze(-1)  # [batch]
 
 class DiscriminatorDataset:
-    def __init__(self, graphs, actions, label, seed, device):
+    def __init__(self, graphs, actions, labels, seed, device):
         """
-        y: list of binary labels (0=student, 1=teacher)
+        graphs: list of igraph graphs
+        actions: list of integer actions
+        labels: list of binary labels (0=student, 1=teacher)
         """
 
         self.device = device
-        
+        self.rng = np.random.default_rng(seed)
+
         # Shuffle the dataset
-        indices = torch.randperm(len(self.embeddings))
-        self.graphs = self.graphs[indices]
-        self.actions = self.actions[indices]
-        self.labels = self.labels[indices]
+        indices = self.rng.permutation(len(graphs))
+        self.graphs = [graphs[i] for i in indices]
+        # keep actions/labels as tensors so we can index with torch tensors later
+        self.actions = torch.as_tensor([actions[i] for i in indices], device=device, dtype=torch.long)
+        self.labels = torch.as_tensor([labels[i] for i in indices], device=device, dtype=torch.float32)
+
+        self.size = len(self.graphs)
         
     def sample(self, batch_size, encoder):
         """Sample a batch from the dataset"""
-        if len(self.x) == 0:
+        if len(self.graphs) == 0:
             return None, None
             
-        indices = torch.randint(0, len(self.labels), (batch_size,))
+        indices = torch.randint(0, self.size, (min(batch_size, self.size),), device=self.device)
 
-        batch_graphs = self.graphs[indices]
+        # graphs stay as a Python list, so index via Python integers
+        batch_graphs = [self.graphs[i] for i in indices.tolist()]
         batch_actions = self.actions[indices]
 
-        g = Batch(device, [ig_to_data(g) for g in batch_graphs])
+        g = Batch(self.device, [ig_to_data(g) for g in batch_graphs])
         e = encoder(g) #[N,2KF]
-        batch_x = e[g.act_offsets + batch_actions] 
-        batch_y = torch.tensor(self.labels[indices]).to(self.device)
+        batch_x = e[g.act_offsets + batch_actions]
+        batch_y = self.labels[indices]
         return batch_x, batch_y
     
     def __len__(self):
