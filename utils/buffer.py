@@ -47,7 +47,7 @@ class ReplayBuffer():
         
         return obs, act, obs_next, rew, done
 
-class FinetuneBuffer():
+class PriorReplayBuffer():
     def __init__(self, buffer_size, device, gamma=1.0, alpha=0.3, beta=1.0, lambda_grad=1.0, teacher_bonus=1.0, epsilon=1e-6):
         self.buffer_size = buffer_size
         self.device = device
@@ -251,6 +251,40 @@ class RolloutBuffer:
             'done': done_list
         }
         self.trajectories.append(trajectory)
+
+    def sample(self, batch_size):
+        """
+        Sample a batch of trajectories from the buffer and flatten to transitions
+        """
+        if len(self.trajectories) == 0:
+            return []
+        
+        # Sample trajectories with replacement
+        num_trajs = min(batch_size, len(self.trajectories))
+        indices = np.random.choice(len(self.trajectories), size=num_trajs, replace=False)
+        
+        obs_list = []
+        obs_next_list = []
+        act_list = []
+        rew_list = []
+        done_list = []
+        for idx in indices:
+            traj = self.trajectories[idx]
+            obs_list.extend([g for g in traj["obs"]])
+            obs_next_list.extend([g for g in traj["obs_next"]])
+            act_list.extend(traj["act"])
+            rew_list.extend(traj["rew"])
+            done_list.extend(traj["done"])
+            
+        # Convert to tensors and Batch objects
+        obs = Batch(self.device, [ig_to_data(g) for g in obs_list])
+        obs_next = Batch(self.device, [ig_to_data(g) for g in obs_next_list])
+        act = torch.tensor(act_list, device=self.device, dtype=torch.long)
+        rew = torch.tensor(rew_list, device=self.device, dtype=torch.float32)
+        done = torch.tensor(done_list, device=self.device, dtype=torch.float32)
+            
+        return obs, act, rew, obs_next, done
+
     
     def sample_trajectories(self, batch_size):
         """
@@ -272,7 +306,7 @@ class RolloutBuffer:
         
         # Sample trajectories with replacement
         num_trajs = min(batch_size, len(self.trajectories))
-        indices = np.random.choice(len(self.trajectories), size=num_trajs, replace=True)
+        indices = np.random.choice(len(self.trajectories), size=num_trajs, replace=False)
         
         sampled_trajs = []
         for idx in indices:

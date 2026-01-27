@@ -6,32 +6,24 @@ import tempfile
 import pickle
 import os
 
-def finder(graph):
+def finder(graph:ig.Graph):
     """
-    Use AAA-NetDQN to dismantle a graph
+    Use FINDER to dismantle a graph
     
     Args:
         graph: igraph.Graph object
         
     Returns:
-        tuple: (removed_nodes_list, score,MaxCCList)
+        tuple: (removed_nodes_list, score, MaxCCList)
     """
-    # Point directly to the python executable in your TF conda env
     tf_python_path = "D:\\Anaconda3\\envs\\tf_py37\\python.exe"
-    # import sys
-    # tf_python_path = sys.executable
-    
-    
+
     # Create temporary pickle file for the graph, absolute path
     temp_graph_fd, temp_graph_file = tempfile.mkstemp(suffix='.pkl')
     temp_out_fd, temp_out_file = tempfile.mkstemp(suffix='.json')
-    # Close file descriptors immediately to avoid Windows permission issues
     os.close(temp_graph_fd)
     os.close(temp_out_fd)
 
-    # temp_graph_file = tempfile.NamedTemporaryFile(suffix='.pkl', delete=False)
-    # temp_out_file = tempfile.NamedTemporaryFile(suffix='.json', delete=False)
-    
     try:
         # Save graph to temporary pickle file
         with open(temp_graph_file, 'wb') as f:
@@ -42,25 +34,23 @@ def finder(graph):
         
         # Run the interface
         result = subprocess.run(
-            [tf_python_path, interface_path, "--graph_file", temp_graph_file, "--out", temp_out_file],
+            [tf_python_path, interface_path, "--graph_file", temp_graph_file, "--out_file", temp_out_file],
             capture_output=True, text=True, cwd=os.path.dirname(interface_path)
         )
         
         if result.returncode == 0:
-            # Parse JSON output
-            # output_data = json.loads(result.stdout.strip())
             with open(temp_out_file, 'r') as f:
                 output_data = json.load(f)
-            removed_nodes = output_data['removed_nodes']
+            removals = output_data['removals']
             score = output_data['score']
             MaxCCList = output_data['MaxCCList']
-            return removed_nodes, score, MaxCCList
+            return removals, score, MaxCCList
         else:
-            print(f"Error running finder dismantling: {result.stderr}")
-            return [], 0.0, []
+            print(f"Error in finder returncode: {result.stderr}")
+            return None, 0.0, None
     except Exception as e:
         print(f"Error in finder: {e}")
-        return [], 0.0, []
+        return None, 0.0, None
 
     finally:
         # Clean up temporary file
@@ -71,22 +61,40 @@ def finder(graph):
         
 
 if __name__ == "__main__":
-    # Create a simple test graph
-    G = nx.barabasi_albert_graph(20, 2)
-    
-    # Convert to igraph for testing
-    import igraph as ig
-    # Convert networkx to igraph
-    edges = list(G.edges())
-    ig_graph = ig.Graph(edges=edges, directed=False)
-    
     import pickle
     with open("../graphs/real/FINDER/Crime.pkl",'rb') as f:
-        ig_graph = pickle.load(f)
+        graph = pickle.load(f)
     
-    print("Testing finder with Barabási-Albert graph (20 nodes, m=2)")
-    removed_nodes, score = finder(ig_graph)
+    removals, score, _ = finder(graph)
     
-    print(f"Removed nodes: {removed_nodes}")
+    import sys
+    sys.path.append("..")
+    from baseline import evaluate_sol
+    auc, robustness = evaluate_sol(graph,removals)
+
+    graph = graph.to_networkx()
+    # Calculate robustness in forward order (same as EvaluateSol)
+    # This removes nodes one by one and tracks the largest connected component
+    graph_test = graph.copy()
+    num_nodes = graph.number_of_nodes()
+    total_max_num = 0.0
+    max_wcc_sz_list_forward = []
+    # Remove nodes in forward order (same as dismantling process)
+    for node in removals:
+        # Remove the node from the graph
+        if node in graph_test:
+            graph_test.remove_node(node)
+        
+        # Find the largest connected component after removal
+        if graph_test.number_of_nodes() > 0:
+            max_cc_size = max(len(c) for c in nx.connected_components(graph_test))
+        else:
+            max_cc_size = 0
+        
+        total_max_num += max_cc_size
+        max_wcc_sz_list_forward.append(max_cc_size / num_nodes)
+    robustness_forward = total_max_num / (num_nodes * num_nodes)
+    
+    print(f"Removed nodes: {removals}")
     print(f"Score: {score}")
     

@@ -32,7 +32,7 @@ def is_terminal(G,threshold):
         return True
     else: return False
 
-def spectral_dismantling(G, max_steps=None, threshold=None):
+def spectral(G, max_steps=None, threshold=None):
     temp_G = G.copy()
     ensure_attribute(temp_G)
     removals = []
@@ -208,7 +208,7 @@ def adaptive_ci(G, max_steps=None, threshold=None):
     return removals
 
 
-def random_dismantling(G, max_steps=None, threshold=None):
+def random(G, max_steps=None, threshold=None):
     """Random dismantling for comparison"""
     temp_G = G.copy()
     ensure_attribute(temp_G)
@@ -376,9 +376,9 @@ def evaluate_sol(graph, removals):
 
 # Usage
 METHODS = {
-    "Random": random_dismantling,
+    "Random": random,
     "CoreHD": core_hd,
-    "Spectral": spectral_dismantling,
+    "Spectral": spectral,
     "Degree": adaptive_degree,
     "BPD": bpd_dismantling,
     "BetweennessNA": betweenness,
@@ -389,11 +389,7 @@ METHODS = {
 
 def baseline_dismantling(graph, methods,max_steps=None,visualize=False):
     ensure_attribute(graph)
-    n_init = graph.vcount() 
     methods_results = {}
-    color_map = ['blue','orange','green','grey']
-    i = 0
-    plt.figure(figsize=(6,4))
     for name, func in methods.items():
         # Get the sequence of nodes to remove
         removals = func(graph,max_steps=max_steps)
@@ -411,52 +407,24 @@ def baseline_dismantling(graph, methods,max_steps=None,visualize=False):
 
 #-----------------------------------------------------------------
 # Import FINDER methods
-def finder_dismantling_wrapper(G, max_steps=None):
+def finder_wrapper(graph, max_steps=None):
     from baseline_rl.finder import finder
-    removals, score, MaxCCList = finder(G)
-    print(len(set(removals)))
+    removals, score, MaxCCList = finder(graph)
+    auc, robustness = evaluate_sol(graph, removals)
     return removals
 
 METHODS.update({
-    "FINDER": finder_dismantling_wrapper
+    "FINDER": finder_wrapper
 })
 
-# Import GND methods
-try:
-    from gnd_python import gnd_spectral_dismantling, gnd_weighted_dismantling
-    from gnd_reinsertion import gnd_with_reinsertion
-    GND_AVAILABLE = True
-except ImportError:
-    print("GND methods not available - gnd_python.py or gnd_reinsertion.py not found")
-    GND_AVAILABLE = False
 
-def gnd_dismantling_wrapper(G, max_steps=None):
+def gnd_wrapper(graph, max_steps=None):
     """Wrapper for GND weighted dismantling"""
-    if not GND_AVAILABLE:
-        return adaptive_degree(G, max_steps)
-    return gnd_weighted_dismantling(G, max_steps)
+    pass
 
-def gnd_spectral_wrapper(G, max_steps=None):
-    """Wrapper for GND spectral dismantling"""
-    if not GND_AVAILABLE:
-        return spectral_dismantling(G, max_steps)
-    return gnd_spectral_dismantling(G, max_steps)
-
-def gnd_with_reinsertion_wrapper(G, max_steps=None):
-    """Wrapper for GND with reinsertion"""
-    if not GND_AVAILABLE:
-        return adaptive_degree(G, max_steps)
-    return gnd_with_reinsertion(G, target_size_ratio=0.01, use_weighted=True, 
-                               reinsertion_threshold=max(100, G.vcount()//10))
-
-
-# Add GND methods if available
-if GND_AVAILABLE:
-    METHODS.update({
-        "GND Weighted": gnd_dismantling_wrapper,
-        "GND Spectral": gnd_spectral_wrapper,
-        "GNDR": gnd_with_reinsertion_wrapper,
-    })
+METHODS.update({
+    "GND": gnd_wrapper
+})
 
 
 if __name__ == "__main__":
@@ -465,10 +433,10 @@ if __name__ == "__main__":
     
     # Define methods
     methods = {
-        "Spectral": spectral_dismantling,
+        "Spectral": spectral,
         "CoreHD": core_hd,
         "Adaptive Degree": adaptive_degree,
-        "Random": random_dismantling
+        "Random": random
     }
     
     # Test different graph types

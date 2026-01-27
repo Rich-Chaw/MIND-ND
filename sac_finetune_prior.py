@@ -15,7 +15,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from env import DismantleEnv
 from networks.dismantle import load_sac_dismantler
-from utils import ReplayBuffer, FinetuneBuffer, Batch, validate, validate_with_type_logging, ig_to_data, Discriminator, train_discriminator, DiscriminatorDataset
+from utils import ReplayBuffer, PriorReplayBuffer, Batch, validate, validate_with_type_logging, ig_to_data, Discriminator, train_discriminator, DiscriminatorDataset
 import torch.nn.functional as F
 import gc
 
@@ -29,6 +29,7 @@ class Args:
     """random seed"""
     device: str='cuda:0'
     """the device to use"""
+    gnn: str='mind'
     num_envs: int=64
     """number of parallel environments,default 64"""
     total_steps: int=20000
@@ -121,12 +122,14 @@ class Args:
     """apply instance normalization"""
 
     # pretrain directories
-    train_dir: str = 'graphs/train/100_200_ER_LPA_COPY_10000'
-    valid_dir: str = 'graphs/valid'
+    train_dir: str = 'graphs/train/100_200_ER_LPA_COPY_rw_10000'
+    valid_dir: str = 'graphs/valid/valid'
 
     # Finetuning directories
-    ft_train_dir: str = 'graphs/train/50_100_SBM_2000'
-    ft_valid_dir: str = 'graphs/valid/valid_20260104'
+    # ft_train_dir: str = 'graphs/train/50_100_SBM_2000'
+    # ft_valid_dir: str = 'graphs/valid/50_100_SBM_30'
+    ft_train_dir: str = 'graphs/train/100_200_ER_LPA_COPY_rw_10000'
+    ft_valid_dir: str = 'graphs/valid/valid'
 
 from finetune_utils import teacher_wrapper, teacher_step, compute_reward_shaping
 
@@ -202,10 +205,10 @@ if __name__ == "__main__":
         seed=args.seed
     )
     
-    buffer = FinetuneBuffer(args.buffer_size, device)
+    buffer = PriorReplayBuffer(args.buffer_size, device)
 
     # Load pretrained network 
-    policy, qf1, qf2, qf1_target, qf2_target = load_sac_dismantler(args.num_features, args.num_heads, args.num_mps, device, args.ckpt_pth)
+    policy, qf1, qf2, qf1_target, qf2_target = load_sac_dismantler(args.num_features, args.num_heads, args.num_mps, args.gnn, device, args.ckpt_pth)
     print(f"Loaded checkpoint for fineturning: {args.ckpt_pth}")
     
     # Store original freeze_gnn setting for later restoration
@@ -263,7 +266,7 @@ if __name__ == "__main__":
     policy_pretrain = None
     if args.distillation:
         # Create pretrain network (frozen for distillation)
-        policy_pretrain, _, _, _, _ = load_sac_dismantler(args.num_features, args.num_heads, args.num_mps, device, args.pretrained_ckpt_pth)
+        policy_pretrain, _, _, _, _ = load_sac_dismantler(args.num_features, args.num_heads, args.num_mps,args.gnn, device, args.pretrained_ckpt_pth)
         
         # Freeze pretrain network parameters
         for param in policy_pretrain.parameters():

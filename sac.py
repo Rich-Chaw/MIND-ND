@@ -26,6 +26,7 @@ class Args:
     """random seed"""
     device: str='cuda:0'
     """the device to use"""
+    gnn: str='mind'
     num_envs: int=64
     """number of parallel environments,default 64"""
     total_steps: int=200000
@@ -63,8 +64,8 @@ class Args:
     normalize: bool=True
     """apply instance normalization"""
     
-    train_dir: str = 'graphs/train/100_200_ER_LPA_COPY_10000'
-    valid_dir: str = 'graphs/valid'
+    train_dir: str = 'graphs/train/100_200_ER_LPA_COPY_rw_10000'
+    valid_dir: str = 'graphs/valid/valid'
 
 
 
@@ -105,7 +106,7 @@ if __name__ == "__main__":
     
     buffer = ReplayBuffer(args.buffer_size, device)
 
-    policy, qf1, qf2, qf1_target, qf2_target = load_sac_dismantler(args.num_features, args.num_heads, args.num_mps, device, args.ckpt_pth)
+    policy, qf1, qf2, qf1_target, qf2_target = load_sac_dismantler(args.num_features, args.num_heads, args.num_mps, args.gnn, device, args.ckpt_pth)
     q_optimizer = torch.optim.Adam(list(qf1.parameters()) + list(qf2.parameters()), lr=args.learning_rate, eps=1e-4)
     policy_optimizer = torch.optim.Adam(list(policy.parameters()), lr=args.learning_rate, eps=1e-4)
 

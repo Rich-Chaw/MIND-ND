@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 import pickle
 from scipy.spatial.distance import pdist, squareform
 
-def random_graph(N,p):
+def ER(N,p):
     return ig.Graph.Erdos_Renyi(n=N, p=p)
 
 def random_geometric_graph(N, r):
@@ -162,7 +162,8 @@ def necklace(N, num_cliques=5):
     return G
 
 
-
+def BA(N, m):
+    return ig.Graph.Barabasi(N,m)
 
 def WS(N, k, p):
     """

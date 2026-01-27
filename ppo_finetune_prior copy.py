@@ -1,3 +1,4 @@
+from math import gamma
 import os
 import tyro
 import time
@@ -37,7 +38,7 @@ class Args:
     # """size of the replay buffer, default 2000000"""
     batch_size: int=32
     """batch size trajectories for updating network"""
-    mini_batch_size: int = 512
+    mini_batch_size: int = 256
     """mini batch size transitions for one uptation"""
     val_frequency: int=200
     """validation frequency"""
@@ -45,21 +46,21 @@ class Args:
     """save frequency"""
     # learning_starts: int= 2000
     # """timestep to start learning, default 2000"""
-    learning_rate: float=5e-5
+    learning_rate: float=3e-5
     """learning rate for the policy and the value networks"""
     gamma: float=0.99
     """Discount factor"""
-    gae_lambda: float=0.98
+    gae_lambda: float=0.95
     """GAE lambda parameter for advantage estimation"""
-    num_updates: int=3
+    num_updates: int=8
     """number of network updates at each trajectory"""
     
     # PPO specific parameters
-    clip_epsilon: float=0.1
+    clip_epsilon: float=0.2
     """PPO clip epsilon for clipped objective"""
-    value_coeff: float=0.5
+    value_coeff: float=0.05
     """Coefficient for value loss"""
-    entropy_coeff: float=0.001
+    entropy_coeff: float=0.1
     """Coefficient for entropy bonus"""
     max_grad_norm: float=0.5
     """Maximum gradient norm for clipping"""
@@ -303,7 +304,7 @@ if __name__ == "__main__":
     vf_params = [p for p in vf.parameters() if p.requires_grad]
     policy_params = [p for p in policy.parameters() if p.requires_grad]
     
-    vf_optimizer = torch.optim.Adam(vf_params, lr=lr * 0.2, eps=1e-4)
+    vf_optimizer = torch.optim.Adam(vf_params, lr=lr, eps=1e-4)
     policy_optimizer = torch.optim.Adam(policy_params, lr=lr, eps=1e-4)
     
     discriminator = Discriminator(2 * args.num_features * args.num_mps).to(device)
@@ -548,32 +549,30 @@ if __name__ == "__main__":
                 rew_traj = traj_data['rew']
                 done_traj = traj_data['done']
                 
-                # Calculate GAE and V-target per trajectory
-                with torch.no_grad():
-                    v_traj = vf(obs_traj).flatten()
-                    v_next_traj = vf(traj_data['obs_next']).flatten()
-                    
-                    adv_traj = torch.zeros_like(rew_traj)
-                    vt_traj = torch.zeros_like(rew_traj)
-                    
-                    last_adv = 0
-                    for t in reversed(range(len(rew_traj))):
-                        mask = 1.0 - done_traj[t]
-                        delta = rew_traj[t] + args.gamma * v_next_traj[t] * mask - v_traj[t]
-                        last_adv = delta + args.gamma * args.gae_lambda * last_adv * mask
-                        adv_traj[t] = last_adv
-                        vt_traj[t] = adv_traj[t] + v_traj[t] 
-                    
-                    # Store old logprobs before the policy changes
-                    _, logp_traj = policy.get_action(obs_traj)
-                    traj_act_indices = traj_data['act'] + obs_traj.act_offsets
-                    old_logp_traj = logp_traj[traj_act_indices]
+                v_traj = vf(obs_traj).flatten()
+                v_next_traj = vf(traj_data['obs_next']).flatten()
+                v_target_traj = rew_traj + args.gamma * v_next_traj * (1-done_traj)
+                v_delta = (v_target_traj-v_next_traj).cpu().detach().numpy()
+
+                adv_traj = torch.zeros_like(v_traj)
+
+                last_adv = 0
+                for t in reversed(range(len(v_delta))):
+                    last_adv = v_delta[t] + args.gamma * args.gae_lambda * last_adv
+                    adv_traj[t] = last_adv
+                    v_target_traj[t] = adv_traj[t] + v_traj[t] 
+                
+                # Store old logprobs before the policy changes
+                _, logp_traj = policy.get_action(obs_traj)
+                traj_act_indices = traj_data['act'] + obs_traj.act_offsets
+                old_logp_traj = logp_traj[traj_act_indices].detach()
+
 
                 # Move to CPU to save GPU memory
                 pool_obs_list.extend(batch_to_igraphs(traj_data['obs']))
                 pool_act.append(traj_data['act'].cpu())
                 pool_advantages.append(adv_traj.cpu())
-                pool_v_target.append(vt_traj.cpu())
+                pool_v_target.append(v_target_traj.cpu())
                 pool_old_logp.append(old_logp_traj.cpu())
 
             # 3. Concatenate pools
@@ -600,12 +599,12 @@ if __name__ == "__main__":
                     m_obs = Batch(device, [ig_to_data(pool_obs_list[i]) for i in m_idx])
                     m_act = pool_act[m_idx].to(device)
                     m_adv = pool_advantages[m_idx].to(device)
-                    m_vt = pool_v_target[m_idx].to(device)
+                    m_v_target = pool_v_target[m_idx].to(device)
                     m_old_logp = pool_old_logp[m_idx].to(device)
 
                     # --- Value Loss ---
                     v_curr = vf(m_obs).flatten()
-                    v_loss = mse_loss(v_curr, m_vt)
+                    v_loss = mse_loss(v_curr, m_v_target)
 
                     # --- Actor Loss (Clipped) ---
                     _, logp = policy.get_action(m_obs)
@@ -625,22 +624,6 @@ if __name__ == "__main__":
                     # Total Loss
                     loss = policy_loss + args.value_coeff * v_loss - args.entropy_coeff * entropy_bonus
 
-                    # --- CALCULATE DIAGNOSTICS ---
-                    with torch.no_grad():
-                        # Clip fraction: how often the ratio is outside [1-eps, 1+eps]
-                        clip_fraction = ((ratio - 1.0).abs() > args.clip_epsilon).float().mean().item()
-                        
-                        # Approximate KL: (old_logp - new_logp)
-                        # A better version: ((ratio - 1) - log_ratio).mean()
-                        log_ratio = logp[m_act_offset] - m_old_logp
-                        approx_kl = ((ratio - 1) - log_ratio).mean().item()
-
-                        # Explained Variance
-                        y_pred, y_true = v_curr.detach(), m_vt.detach()
-                        var_y = torch.var(y_true)
-                        explained_var = 1 - torch.var(y_true - y_pred) / (var_y + 1e-8) if var_y > 1e-8 else torch.tensor(0.0)
-                        explained_var = explained_var.item()
-
                     # Backward and Step
                     policy_optimizer.zero_grad(); vf_optimizer.zero_grad()
                     loss.backward()
@@ -649,20 +632,20 @@ if __name__ == "__main__":
                     policy_optimizer.step(); vf_optimizer.step()
 
                     # Cleanup mini-batch to free GPU memory
-                    del m_obs, m_act, m_adv, m_vt, m_old_logp, v_curr, logp
-                
+                    del m_obs, m_act, m_adv, m_v_target, m_old_logp, v_curr, logp
+
+                if update_idx == args.num_updates - 1:
+                    
+                    print("step: ",global_step, " losses/v_loss: ", v_loss.item())
+
                 # Logging (only on last update of first trajectory to avoid spam)
                 if args.use_tb and update_idx == args.num_updates - 1:
                     writer.add_scalar("losses/loss", loss.item(), global_step)
                     writer.add_scalar("losses/v_loss", v_loss.item(), global_step)
                     writer.add_scalar("losses/policy_loss", -policy_loss.item(), global_step)
-                    writer.add_scalar("indicator/entropy", entropy_bonus.item(), global_step)
-                    writer.add_scalar("indicator/advantages", pool_advantages.mean().item(), global_step)
-                    writer.add_scalar("indicator/advantages_std", pool_advantages.std().item(), global_step)
-                    writer.add_scalar("indicator/ratio", ratio.mean().item(), global_step)
-                    writer.add_scalar("indicator/clip_fraction", clip_fraction, global_step)
-                    writer.add_scalar("indicator/approx_kl", approx_kl, global_step)
-                    writer.add_scalar("indicator/explained_variance", explained_var, global_step)
+                    writer.add_scalar("losses/entropy", entropy_bonus.item(), global_step)
+                    writer.add_scalar("losses/advantages", pool_advantages.mean().item(), global_step)
+                    writer.add_scalar("losses/ratio", ratio.mean().item(), global_step)
                     # if args.distillation:
                     #     writer.add_scalar("losses/distill_loss", distill_loss.item(), global_step)
                 

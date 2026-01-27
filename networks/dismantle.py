@@ -4,15 +4,15 @@ from torch_scatter import scatter_log_softmax, scatter_max, scatter_mean
 
 from networks.mind import MIND
 from utils.graph_data import Batch
+from .gnn import GNN_ENCODER
 
 
-
-def load_sac_dismantler(F, H, K, device, ckpt_pth=None):
-    policy = SACPolicy(F, H, K).to(device)
-    qf1 = SACQNetwork(F, H, K).to(device)
-    qf2 = SACQNetwork(F, H, K).to(device)
-    qf1_target = SACQNetwork(F, H, K).to(device)
-    qf2_target = SACQNetwork(F, H, K).to(device)
+def load_sac_dismantler(F, H, K, gnn, device, ckpt_pth=None):
+    policy = SACPolicy(F, H, K, gnn).to(device)
+    qf1 = SACQNetwork(F, H, K, gnn).to(device)
+    qf2 = SACQNetwork(F, H, K, gnn).to(device)
+    qf1_target = SACQNetwork(F, H, K, gnn).to(device)
+    qf2_target = SACQNetwork(F, H, K, gnn).to(device)
     if ckpt_pth != None:
         ckpt = torch.load(ckpt_pth)
         policy.load_state_dict(ckpt['policy_state_dict'])
@@ -29,9 +29,9 @@ def load_sac_dismantler(F, H, K, device, ckpt_pth=None):
 
 
 class SACPolicy(nn.Module):
-    def __init__(self, num_features, num_heads, num_mps):
+    def __init__(self, num_features, num_heads, num_mps, gnn):
         super().__init__()
-        self.graph_embedding = MIND(num_features, num_heads, num_mps)
+        self.graph_embedding = GNN_ENCODER[gnn](num_features, num_heads, num_mps)
         e_size = (num_features*num_mps)*2
 
         self.mlp = nn.Sequential(
@@ -68,9 +68,9 @@ class SACPolicy(nn.Module):
 
 
 class SACQNetwork(nn.Module):
-    def __init__(self, num_features, num_heads, num_mps):
+    def __init__(self, num_features, num_heads, num_mps, gnn):
         super().__init__()
-        self.graph_embedding = MIND(num_features, num_heads, num_mps)
+        self.graph_embedding = GNN_ENCODER[gnn](num_features, num_heads, num_mps)
         e_size = (num_features*num_mps)*2
 
         self.mlp = nn.Sequential(

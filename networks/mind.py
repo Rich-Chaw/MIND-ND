@@ -4,6 +4,9 @@ import torch.nn as nn
 from torch_scatter import scatter_add
 from torch_geometric.nn import GraphNorm
 
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.graph_data import Batch
 
 
@@ -61,7 +64,7 @@ class MIND(nn.Module):
         super().__init__()
         self.num_features = num_features # F
         self.register_buffer("x_init", torch.ones(1, num_features))
-        self.num_mps = num_mps # K
+        self.num_mps = num_mps # K layers
         self.convs = nn.ModuleList([MINDConv(num_features, num_heads) for _ in range(num_mps)])
         self.graph_norm = GraphNorm(num_features*num_mps, eps=1e-4)
 
