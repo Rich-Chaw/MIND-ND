@@ -228,9 +228,21 @@ class RolloutBuffer:
     Buffer for storing complete trajectories (episodes) for PPO training.
     Each trajectory contains a sequence of transitions until episode termination.
     """
-    def __init__(self, device):
+    def __init__(self, device, buffer_size=None):
+        """
+        Args:
+            device: Device to store tensors on
+            buffer_size: Optional maximum number of trajectories to store. If None, stores all trajectories.
+        """
         self.device = device
-        self.trajectories = []  # List of trajectories, each is a dict with lists of transitions
+        self.buffer_size = buffer_size
+        # List of trajectories, each is a dict with lists of transitions
+        if buffer_size is not None:
+            self.trajectories = [None] * buffer_size
+        else:
+            self.trajectories = []
+        self.ptr = 0
+        self.full = False
         
     def add_trajectory(self, obs_list, act_list, rew_list, obs_next_list, done_list):
         """
@@ -250,18 +262,27 @@ class RolloutBuffer:
             'obs_next': obs_next_list,
             'done': done_list
         }
-        self.trajectories.append(trajectory)
+        
+        if self.buffer_size is not None:
+            # Use circular buffer if size is limited
+            self.trajectories[self.ptr] = trajectory
+            self.ptr = (self.ptr + 1) % self.buffer_size
+            if self.ptr == 0:
+                self.full = True
+        else:
+            # No size limit - append to list
+            self.trajectories.append(trajectory)
 
     def sample(self, batch_size):
         """
         Sample a batch of trajectories from the buffer and flatten to transitions
         """
-        if len(self.trajectories) == 0:
+        if self.size() == 0:
             return []
         
         # Sample trajectories with replacement
-        num_trajs = min(batch_size, len(self.trajectories))
-        indices = np.random.choice(len(self.trajectories), size=num_trajs, replace=False)
+        num_trajs = min(batch_size, self.size())
+        indices = np.random.choice(self.size(), size=num_trajs, replace=False)
         
         obs_list = []
         obs_next_list = []
@@ -301,12 +322,12 @@ class RolloutBuffer:
             - obs_next: Batch object
             - done: torch.Tensor of done flags
         """
-        if len(self.trajectories) == 0:
+        if self.size() == 0:
             return []
         
         # Sample trajectories with replacement
-        num_trajs = min(batch_size, len(self.trajectories))
-        indices = np.random.choice(len(self.trajectories), size=num_trajs, replace=False)
+        num_trajs = min(batch_size, self.size())
+        indices = np.random.choice(self.size(), size=num_trajs, replace=False)
         
         sampled_trajs = []
         for idx in indices:
@@ -335,6 +356,141 @@ class RolloutBuffer:
     
     def size(self):
         """Return the number of trajectories in the buffer."""
-        return len(self.trajectories)
+        if self.buffer_size is not None:
+            return self.buffer_size if self.full else self.ptr
+        else:
+            return len(self.trajectories)
+    
+    def sample_sequences_with_context(self, batch_size, seq_len, gnn_encoder):
+        """
+        Sample batch_size sequences of length seq_len from trajectories.
+        Returns context sequences (first seq_len-1 transitions) and training transitions (last transition).
+        
+        Args:
+            batch_size: Number of sequences to sample
+            seq_len: Length of sequence (last transition is for training, rest is context)
+            gnn_encoder: GNN encoder to encode states for context
+            
+        Returns:
+            context_seqs: [batch_size, seq_len-1, input_dim] - context sequences
+            obs_b: Batch - observations for training (last transition)
+            act_b: [batch_size] - actions for training
+            obs_next_b: Batch - next observations for training
+            rew_b: [batch_size] - rewards for training
+            done_b: [batch_size] - done flags for training
+        """
+        if self.size() == 0:
+            return None
+        
+        # Filter trajectories that have at least seq_len transitions
+        valid_trajectories = [i for i in range(self.size()) 
+                            if len(self.trajectories[i]['obs']) >= seq_len]
+        
+        if len(valid_trajectories) == 0:
+            return None
+        
+        # Sample trajectory indices
+        sampled_indices = np.random.choice(valid_trajectories, size=batch_size, replace=True)
+        
+    
+        obs_list = []
+        act_list = []
+        rew_list = []
+        obs_next_list = []
+        done_list = []
+        
+        # Collect context graphs across the whole minibatch for a single GNN pass
+        # We'll flatten in (sample_idx, time_idx) order so we can reshape back easily.
+        flat_context_obs = []
+        flat_context_obs_next = []
+        flat_context_act = []
+        flat_context_rew = []
+        context_len = seq_len - 1
+        
+        for traj_idx in sampled_indices:
+            traj = self.trajectories[traj_idx]
+            traj_len = len(traj['obs'])
+            
+            # Sample a random starting index such that we have seq_len transitions
+            start_idx = np.random.randint(0, traj_len - seq_len + 1)
+            
+            # Extract sequence
+            obs_seq = traj['obs'][start_idx:start_idx + seq_len]
+            act_seq = traj['act'][start_idx:start_idx + seq_len]
+            rew_seq = traj['rew'][start_idx:start_idx + seq_len]
+            obs_next_seq = traj['obs_next'][start_idx:start_idx + seq_len]
+            
+            # Context: first seq_len-1 transitions
+            context_obs = obs_seq[:-1]
+            context_act = act_seq[:-1]
+            context_rew = rew_seq[:-1]
+            context_obs_next = obs_next_seq[:-1]
+            
+            # Training sample: last transition
+            obs_list.append(obs_seq[-1])
+            act_list.append(act_seq[-1])
+            rew_list.append(rew_seq[-1])
+            obs_next_list.append(obs_next_seq[-1])
+            done_list.append(traj['done'][start_idx + seq_len - 1])
+
+            # Accumulate flattened context for later batch encoding
+            flat_context_obs.extend(context_obs)
+            flat_context_obs_next.extend(context_obs_next)
+            flat_context_act.extend(context_act)
+            flat_context_rew.extend(context_rew)
+        
+        # Encode all context states in one GNN pass (much faster than per-graph loops)
+        with torch.no_grad():
+            # Current states
+            obs_ctx_b = Batch(self.device, [ig_to_data(g) for g in flat_context_obs])
+            emb_ctx = gnn_encoder(obs_ctx_b)  # [N_ctx, 2KF]
+            embed_dim = emb_ctx.shape[1] // 2
+            graph_emb_ctx = emb_ctx[:, embed_dim:]  # [N_ctx, KF]
+            from torch_scatter import scatter_mean
+            state_ctx = scatter_mean(
+                graph_emb_ctx,
+                obs_ctx_b.batch_non_omni,
+                dim=0,
+                dim_size=obs_ctx_b.batch_size,
+            )  # [batch_size*(seq_len-1), KF]
+
+            # Next states
+            obs_next_ctx_b = Batch(self.device, [ig_to_data(g) for g in flat_context_obs_next])
+            emb_next_ctx = gnn_encoder(obs_next_ctx_b)  # [N_next_ctx, 2KF]
+            graph_emb_next_ctx = emb_next_ctx[:, embed_dim:]  # [N_next_ctx, KF]
+            state_next_ctx = scatter_mean(
+                graph_emb_next_ctx,
+                obs_next_ctx_b.batch_non_omni,
+                dim=0,
+                dim_size=obs_next_ctx_b.batch_size,
+            )  # [batch_size*(seq_len-1), KF]
+
+        # Reshape back to [batch_size, seq_len-1, KF]
+        state_ctx = state_ctx.view(batch_size, context_len, -1)
+        state_next_ctx = state_next_ctx.view(batch_size, context_len, -1)
+
+        # Actions/rewards to tensors and reshape to [batch_size, seq_len-1]
+        act_ctx = torch.tensor(flat_context_act, device=self.device, dtype=torch.float32).view(batch_size, context_len)
+        rew_ctx = torch.tensor(flat_context_rew, device=self.device, dtype=torch.float32).view(batch_size, context_len)
+
+        # Build context sequence: [batch_size, seq_len-1, input_dim] where input_dim = KF + 1 + 1 + KF
+        context_seqs = torch.cat(
+            [
+                state_ctx,
+                act_ctx.unsqueeze(2),
+                rew_ctx.unsqueeze(2),
+                state_next_ctx,
+            ],
+            dim=2,
+        )
+        
+        # Create Batch objects for training samples
+        obs_b = Batch(self.device, [ig_to_data(g) for g in obs_list])
+        obs_next_b = Batch(self.device, [ig_to_data(g) for g in obs_next_list])
+        act_b = torch.tensor(act_list, device=self.device, dtype=torch.long)
+        rew_b = torch.tensor(rew_list, device=self.device, dtype=torch.float32)
+        done_b = torch.tensor(done_list, device=self.device, dtype=torch.float32)
+        
+        return context_seqs, obs_b, act_b, obs_next_b, rew_b, done_b
     
     

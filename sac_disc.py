@@ -15,7 +15,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from env import DismantleEnv
 from networks.dismantle import load_sac_dismantler
-from utils import ReplayBuffer, PriorReplayBuffer, Batch, validate, validate_with_type_logging, ig_to_data, Discriminator, train_discriminator, DiscriminatorDataset
+from utils import ReplayBuffer, PriorReplayBuffer, Batch, validate, validate, ig_to_data, Discriminator, train_discriminator, DiscriminatorDataset
 import torch.nn.functional as F
 import gc
 
@@ -69,10 +69,6 @@ class Args:
     freeze_gnn: bool=False
     """freeze GNN encoder layers for transfer_learning """
 
-    replay: bool=False
-    replay_ratio: float=0.2
-    """ratio of original data to mix with new data """
-    
     # Teacher method settings
     teacher_method: Optional[str] = None
     """Teacher method: 'spectral', 'betweenness'"""
@@ -87,9 +83,9 @@ class Args:
     demonstrate: bool = False
     """Save demonstation in teacher buffer before training"""
     num_demos: int = 1000
-    
+
     discriminator: bool = False
-    discriminator_train_frequency: int = 50
+    discriminator_ckpt: str = "saved/discriminator/discriminator.ckpt"
 
     # Reward shaping settings
     reward_shaping: bool = False
@@ -117,11 +113,6 @@ class Args:
     train_dir: str = 'graphs/train/100_200_ER_LPA_COPY_rw_10000'
     valid_dir: str = 'graphs/valid/valid'
 
-    # Finetuning directories
-    # ft_train_dir: str = 'graphs/train/50_100_SBM_2000'
-    # ft_valid_dir: str = 'graphs/valid/50_100_SBM_30'
-    ft_train_dir: str = 'graphs/train/100_200_ER_LPA_COPY_rw_10000'
-    ft_valid_dir: str = 'graphs/valid/valid'
 
 from finetune_utils import teacher_wrapper, teacher_step, compute_reward_shaping
 
@@ -134,7 +125,7 @@ if __name__ == "__main__":
     
     now = datetime.now()
     time_string = now.strftime("%Y%m%d_%H%M%S")
-    run_path = f"finetune_task_{time_string}"
+    run_path = f"finetune_prior_{time_string}"
     device = torch.device(args.device)
 
     random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
@@ -151,47 +142,16 @@ if __name__ == "__main__":
     print(f'Finetuning starts at {time_string}')
     print(f'Device is {device}. Seed set to {args.seed}')
 
-    # Setup environments based on finetuning method
-    if args.replay:
-        # Load and mix original and new data
-        from utils import load_g
-        
-        # Load new synthetic data
-        new_graphs = [load_g(os.path.join(args.ft_train_dir, p), 
-                            f'new_{os.path.splitext(os.path.basename(p))[0]}') 
-                     for p in sorted(os.listdir(args.ft_train_dir))]
-        
-        # Load original training data (sample based on replay ratio)
-        orig_files = sorted(os.listdir(args.train_dir))
-        n_orig = int(len(new_graphs) * args.replay_ratio)
-        selected_orig_files = random.sample(orig_files, min(n_orig, len(orig_files)))
-        orig_graphs = [load_g(os.path.join(args.train_dir, p), 
-                             f'orig_{os.path.splitext(os.path.basename(p))[0]}') 
-                      for p in selected_orig_files]
-        
-        # Combine datasets
-        mixed_graphs = new_graphs + orig_graphs
-        print(f'Experience replay: {len(new_graphs)} new + {len(orig_graphs)} original = {len(mixed_graphs)} total graphs')
-        
-        env = DismantleEnv(
-            graph_data=mixed_graphs,
-            batch_size=args.num_envs,
-            is_val=False,
-            seed=args.seed,
-            remove_scc=False
-        )
-    else:
-        # Use only new synthetic data for distillation and transfer learning
-        env = DismantleEnv(
-            data_dir=args.ft_train_dir, 
-            batch_size=args.num_envs, 
-            is_val=False, 
-            seed=args.seed,
-            remove_scc=False
-        )
+    env = DismantleEnv(
+        data_dir=args.train_dir, 
+        batch_size=args.num_envs, 
+        is_val=False, 
+        seed=args.seed,
+        remove_scc=False
+    )
     
     env_val = DismantleEnv(
-        data_dir=args.ft_valid_dir, 
+        data_dir=args.valid_dir, 
         batch_size=args.num_envs, 
         is_val=True, 
         seed=args.seed
@@ -202,32 +162,6 @@ if __name__ == "__main__":
     # Load pretrained network 
     policy, qf1, qf2, qf1_target, qf2_target = load_sac_dismantler(args.num_features, args.num_heads, args.num_mps, args.gnn, device, args.ckpt_pth)
     print(f"Loaded checkpoint for fineturning: {args.ckpt_pth}")
-    
-    # Store original freeze_gnn setting for later restoration
-    original_freeze_gnn = args.freeze_gnn
-    # Always freeze GNN during warmup phase (following guide.md step 3)
-    if args.warmup:
-        args.freeze_gnn = True
-        args.demonstrate = True
-        print("---- Freezing GNN during warmup phase (following guide.md)")
-    
-    if args.freeze_gnn:
-        # Freeze GNN encoder layers, only train MLP
-        for param in policy.graph_embedding.parameters():
-            param.requires_grad = False
-        for param in qf1.graph_embedding.parameters():
-            param.requires_grad = False
-        for param in qf2.graph_embedding.parameters():
-            param.requires_grad = False
-        for param in qf1_target.graph_embedding.parameters():
-            param.requires_grad = False
-        for param in qf2_target.graph_embedding.parameters():
-            param.requires_grad = False
-        
-        frozen_params = sum(p.numel() for p in policy.graph_embedding.parameters())
-        trainable_params = sum(p.numel() for p in policy.mlp.parameters())
-        print(f'---- GNN encoder frozen: {frozen_params} parameters')
-        print(f'---- MLP trainable: {trainable_params} parameters')
      
     if args.demonstrate:
         obs_list, _ = env.reset()
@@ -255,24 +189,9 @@ if __name__ == "__main__":
         print(f"Saved {buffer.ptr} transitions from demonstration in buffer")
 
 
-    policy_pretrain = None
-    if args.distillation:
-        # Create pretrain network (frozen for distillation)
-        policy_pretrain, _, _, _, _ = load_sac_dismantler(args.num_features, args.num_heads, args.num_mps,args.gnn, device, args.pretrained_ckpt_pth)
-        
-        # Freeze pretrain network parameters
-        for param in policy_pretrain.parameters():
-            param.requires_grad = False
-        policy_pretrain.eval()
-        
-        print(f'Loaded pretrained checkpoint: {args.pretrained_ckpt_pth}')
-        print(f'---- pretrain policy network frozen with {sum(p.numel() for p in policy_pretrain.parameters())} parameters')
-        print(f'---- Teacher method: {args.teacher_method} (priority-based sampling: {args.priority_type})')
-    
-    
     # Setup optimizers with appropriate learning rates
     lr = args.learning_rate
-    print(f'Using reduced learning rate: {lr}')
+    print(f'Using learning rate: {lr}')
     
     # Only optimize trainable parameters
     q_params = [p for p in list(qf1.parameters()) + list(qf2.parameters()) if p.requires_grad]
@@ -287,7 +206,153 @@ if __name__ == "__main__":
     num_eps, num_updates = 0, 0
     auc_buffer = deque(maxlen=20)
     start_time = time.time()
-    
+
+    #### WARMUP PHASE ####
+    if args.warmup:
+        warmup_q_optimizer = torch.optim.Adam(q_params, lr=args.warmup_lr, eps=1e-4)
+        warmup_policy_optimizer = torch.optim.Adam(policy_params, lr=args.warmup_lr, eps=1e-4)
+        
+        print(f"Starting warmup phase for {args.warmup_steps} steps, warmup_lr = {args.warmup_lr}...")
+        
+        # Track best warmup checkpoint
+        warmup_directory = os.path.join('saved', run_path, 'warmup')
+        if not os.path.exists(warmup_directory):
+            os.makedirs(warmup_directory)
+        best_warmup_auc = float('inf')
+        best_warmup_ckpt_path = None
+        
+        for warmup_step in range(args.warmup_steps):
+            samples = buffer.sample(
+                args.batch_size,
+                return_indices=False
+            )
+                   
+            if len(samples) == 6:
+                obs_b, act_b, obs_next_b, rew_b, done_b, weights = samples
+            else:
+                # Fallback for old format
+                obs_b, act_b, obs_next_b, rew_b, done_b = samples
+                weights = torch.ones(obs_b.batch_size, device=device)
+            
+            # Update Q-networks (following main loop pattern)
+            with torch.no_grad():
+                _, logp_next_b = policy.get_action(obs_next_b)
+                
+                qf1_next_b = qf1_target(obs_next_b)
+                qf2_next_b = qf2_target(obs_next_b)
+                qf_next_b = torch.min(qf1_next_b, qf2_next_b) - args.alpha * logp_next_b
+                
+                # use E[Q(s',a')|a'] instead of using MC
+                b = obs_next_b.batch[obs_next_b.non_omni_mask]
+                v_next_b = scatter_add(logp_next_b.exp() * qf_next_b, b, dim_size=obs_next_b.batch_size)
+                q_target_b = rew_b.flatten() + (1 - done_b.flatten()) * args.gamma * v_next_b
+                
+                # Explicit cleanup of intermediate tensors
+                del logp_next_b, qf1_next_b, qf2_next_b, qf_next_b, v_next_b
+            
+            # use Q-values only for the taken actions
+            act_b_offset = act_b + obs_b.act_offsets
+            q1_b = qf1(obs_b).gather(0, act_b_offset).flatten()
+            q2_b = qf2(obs_b).gather(0, act_b_offset).flatten()
+            warmup_q_loss = mse_loss(q1_b, q_target_b) + mse_loss(q2_b, q_target_b)
+            
+            # Update Q-networks
+            warmup_q_optimizer.zero_grad()
+            warmup_q_loss.backward()
+            warmup_q_optimizer.step()
+
+            # Update policy
+            # Hard teacher supervision with negative log-likelihood
+            _, student_logp_b = policy.get_action(obs_b)
+            
+            # Convert actions to proper format for indexing
+            teacher_acts_batch = act_b + obs_b.act_offsets
+            
+            # Negative log-likelihood loss
+            warmup_policy_loss = -student_logp_b[teacher_acts_batch].mean()
+            
+            # Update student policy
+            warmup_policy_optimizer.zero_grad()
+            warmup_policy_loss.backward()
+            warmup_policy_optimizer.step()
+            
+            # Update target networks periodically
+            if warmup_step % args.target_frequency == 0:
+                for param, target_param in zip(qf1.parameters(), qf1_target.parameters()):
+                    target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)
+                for param, target_param in zip(qf2.parameters(), qf2_target.parameters()):
+                    target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)
+            
+            if warmup_step % 10 == 0:
+                # print(f"Warmup step {warmup_step}/{args.warmup_steps}, Policy Loss: {warmup_policy_loss.item():.4f}")
+                print(f"Warmup step {warmup_step}/{args.warmup_steps}, Policy Loss: {warmup_policy_loss.item():.4f}, Q Loss: {warmup_q_loss.item():.4f}")
+                if args.use_tb:
+                    # writer.add_scalar("warmup/policy_loss", warmup_policy_loss.item(), warmup_step)
+                    writer.add_scalar("warmup/warmup_q_loss", warmup_q_loss.item(), warmup_step)
+        
+                # Validate student performance after warmup
+                val_auc_list = validate(env_val, policy)[0]
+                auc_val_avg = sum(val_auc_list)/len(val_auc_list)
+                print(f'Warmup step {warmup_step}/{args.warmup_steps}, Avg. Validation AUC is {auc_val_avg:.4f}')
+                if args.use_tb:
+                    writer.add_scalar("warmup/val_auc", auc_val_avg, warmup_step)
+                
+                # Save best warmup checkpoint (lower AUC is better)
+                if auc_val_avg < best_warmup_auc:
+                    best_warmup_auc = auc_val_avg
+                    
+                    # Remove previous best checkpoint if exists
+                    if best_warmup_ckpt_path and os.path.exists(best_warmup_ckpt_path):
+                        os.remove(best_warmup_ckpt_path)
+                        print(f"Removed previous best warmup checkpoint: {best_warmup_ckpt_path}")
+                    
+                    # Save new best checkpoint
+                    best_warmup_ckpt_path = os.path.join(warmup_directory, f'warmup_best_step_{warmup_step}_auc_{auc_val_avg:.4f}.ckpt')
+                    torch.save({
+                        "policy_state_dict": policy.state_dict(), 
+                        "qf1_state_dict": qf1.state_dict(),
+                        "qf2_state_dict": qf2.state_dict(),
+                        "qf1_target_state_dict": qf1_target.state_dict(),
+                        "qf2_target_state_dict": qf2_target.state_dict(),
+                        "warmup_step": warmup_step,
+                        "best_auc": auc_val_avg
+                    }, best_warmup_ckpt_path)
+                    print(f"Saved new best warmup checkpoint: {best_warmup_ckpt_path} (AUC: {auc_val_avg:.4f})")
+            
+            # Cleanup batch tensors
+            del obs_b, act_b, obs_next_b, rew_b, done_b
+            del act_b_offset, q1_b, q2_b, q_target_b, warmup_q_loss
+            del student_logp_b, teacher_acts_batch, warmup_policy_loss
+        
+        # Clear memory after warmup (keep teacher_trajectories for future development)
+        if 'val_auc_list' in locals():
+            del val_auc_list
+        gc.collect()
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+        
+        # Unfreeze GNN after warmup (following guide.md step 4)
+        if args.warmup and not original_freeze_gnn:
+            print("---- Unfreezing GNN after warmup phase")
+            for param in policy.graph_embedding.parameters():
+                param.requires_grad = True
+            for param in qf1.graph_embedding.parameters():
+                param.requires_grad = True
+            for param in qf2.graph_embedding.parameters():
+                param.requires_grad = True
+            for param in qf1_target.graph_embedding.parameters():
+                param.requires_grad = True
+            for param in qf2_target.graph_embedding.parameters():
+                param.requires_grad = True
+            
+            # Update optimizers to include newly unfrozen parameters
+            q_params = [p for p in list(qf1.parameters()) + list(qf2.parameters()) if p.requires_grad]
+            policy_params = [p for p in policy.parameters() if p.requires_grad]
+            q_optimizer = torch.optim.Adam(q_params, lr=lr, eps=1e-4)
+            policy_optimizer = torch.optim.Adam(policy_params, lr=lr, eps=1e-4)
+            
+            unfrozen_params = sum(p.numel() for p in policy.graph_embedding.parameters())
+            print(f'---- GNN encoder unfrozen: {unfrozen_params} parameters')
+
     #### MAIN LOOP ####
     obs_list, _ = env.reset()
     for global_step in range(args.total_steps): # args.num_envs transitions at each global step
@@ -349,7 +414,7 @@ if __name__ == "__main__":
             auc_buffer.append(logger.auc/logger.n_init)
         
         if global_step % args.val_frequency == 0 and global_step >= args.learning_starts:
-            val_auc_list = validate_with_type_logging(env_val, policy)[0]
+            val_auc_list = validate(env_val, policy)[0]
             auc_val_avg = sum(val_auc_list)/len(val_auc_list)
             print(f'At step {global_step}, Avg. Validation AUC is {auc_val_avg:.4f}')
             

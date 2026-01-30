@@ -15,7 +15,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from env import DismantleEnv
 from networks.dismantle import load_ppo_dismantler
-from utils import ReplayBuffer, PriorReplayBuffer, RolloutBuffer, Batch, validate, validate_with_type_logging, ig_to_data, Discriminator, train_discriminator, DiscriminatorDataset
+from utils import ReplayBuffer, PriorReplayBuffer, RolloutBuffer, Batch, validate, validate, ig_to_data, Discriminator, train_discriminator, DiscriminatorDataset
 import torch.nn.functional as F
 import gc
 
@@ -361,7 +361,7 @@ if __name__ == "__main__":
                     writer.add_scalar("warmup/warmup_vf_loss", warmup_vf_loss.item(), warmup_step)
         
                 # Validate student performance after warmup
-                val_auc_list = validate_with_type_logging(env_val, policy)[0]
+                val_auc_list = validate(env_val, policy)[0]
                 auc_val_avg = sum(val_auc_list)/len(val_auc_list)
                 print(f'Warmup step {warmup_step}/{args.warmup_steps}, Avg. Validation AUC is {auc_val_avg:.4f}')
                 if args.use_tb:
@@ -486,7 +486,7 @@ if __name__ == "__main__":
             auc_buffer.append(logger.auc/logger.n_init)
         
         if global_step % args.val_frequency == 0:
-            val_auc_list = validate_with_type_logging(env_val, policy)[0]
+            val_auc_list = validate(env_val, policy)[0]
             auc_val_avg = sum(val_auc_list)/len(val_auc_list)
             print(f'At step {global_step}, Avg. Validation AUC is {auc_val_avg:.4f}')
             

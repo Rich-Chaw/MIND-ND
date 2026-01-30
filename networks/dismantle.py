@@ -5,6 +5,7 @@ from torch_scatter import scatter_log_softmax, scatter_max, scatter_mean
 from networks.mind import MIND
 from utils.graph_data import Batch
 from .gnn import GNN_ENCODER
+from .hypernetwork import Hypernetwork
 
 
 def load_sac_dismantler(F, H, K, gnn, device, ckpt_pth=None):
@@ -123,3 +124,156 @@ def load_ppo_dismantler(F, H, K, device, ckpt_pth=None):
         vf.load_state_dict(ckpt['vf_state_dict'])
     
     return policy, vf
+
+
+# ========== Task-Adaptive Networks with Shared Hypernetwork ==========
+
+
+class SACPolicyWithHypernetwork(nn.Module):
+    """
+    SAC Policy with shared backbone and hypernetwork-generated last layer.
+    """
+    def __init__(self, num_features, num_heads, num_mps, gnn, hypernetwork):
+        super().__init__()
+        self.graph_embedding = GNN_ENCODER[gnn](num_features, num_heads, num_mps)
+        e_size = (num_features*num_mps)*2
+        self.mlp = nn.Sequential(
+            nn.Linear(e_size, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU()
+        )
+        self.hypernetwork = hypernetwork
+    
+    def forward(self, g: Batch, z=None):
+        """
+        Forward pass with optional task embedding.
+        If z is None, uses a default zero embedding (for compatibility).
+        
+        Args:
+            g: Batch of graphs
+            z: Task embedding [latent_dim] or [batch_size, latent_dim]
+        """
+        e = self.graph_embedding(g)  # [N, 2KF]
+        features = self.mlp(e)  # [N, 256]
+        if z is not None:
+            # Generate last layer weights from task embedding
+            weight, bias = self.hypernetwork(z)
+            # Two supported modes:
+            # - z: [latent_dim] -> weight: [1, 256], bias: [1] (shared across graphs)
+            # - z: [B, latent_dim] -> weight: [B, 256], bias: [B] (one per graph)
+            if weight.dim() == 2 and weight.shape[0] == 1:
+                logits = torch.matmul(features, weight.t()) + bias  # [N, 1]
+                logits = logits.flatten()  # [N]
+            else:
+                # Per-graph weights: index each node by its graph id
+                b = g.batch_non_omni  # [N]
+                w = weight[b]  # [N, 256]
+                bb = bias[b]   # [N] or [N, 1]
+                logits = (features * w).sum(dim=1) + bb.view(-1)
+        else:
+            # Fallback: use zero task embedding
+            weight, bias = self.hypernetwork(torch.zeros(self.hypernetwork.latent_dim, device=features.device))
+            logits = torch.matmul(features, weight.t()) + bias
+            logits = logits.flatten()
+        
+        return logits
+    
+    def get_action(self, g: Batch, z=None, val=False):
+        """
+        Get action with optional task embedding.
+        """
+        logits = self(g, z) # [N, 1]
+        log_probs = scatter_log_softmax(logits, g.batch_non_omni, dim_size=g.batch_size)
+        if val:
+            _, act = scatter_max(log_probs, g.batch_non_omni, dim_size=g.batch_size)
+        else:
+            # Gumbel-Max trick
+            gumbel_noise = -torch.empty_like(log_probs).exponential_().log()
+            gumbel_logits = log_probs + gumbel_noise
+            _, act = scatter_max(gumbel_logits, g.batch_non_omni, dim_size=g.batch_size)
+        act -= g.act_offsets
+        return act, log_probs
+
+
+class SACQNetworkWithHypernetwork(nn.Module):
+    """
+    SAC Q-Network with shared backbone and hypernetwork-generated last layer.
+    """
+    def __init__(self,num_features, num_heads, num_mps, gnn, hypernetwork):
+        super().__init__()
+        self.graph_embedding = GNN_ENCODER[gnn](num_features, num_heads, num_mps)
+        e_size = (num_features*num_mps)*2
+        self.mlp = nn.Sequential(
+            nn.Linear(e_size, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU()
+        )
+        self.hypernetwork = hypernetwork
+    
+    def forward(self, g: Batch, z=None):
+        """
+        Forward pass with optional task embedding.
+        """
+        e = self.graph_embedding(g)  # [N, 2KF]
+        features = self.mlp(e)  # [N, 256]
+        
+        if z is not None:
+            # Generate last layer weights from task embedding
+            weight, bias = self.hypernetwork(z)
+            if weight.dim() == 2 and weight.shape[0] == 1:
+                q_vals = torch.matmul(features, weight.t()) + bias  # [N, 1]
+                q_vals = q_vals.flatten()  # [N]
+            else:
+                b = g.batch_non_omni  # [N]
+                w = weight[b]  # [N, 256]
+                bb = bias[b]   # [N] or [N, 1]
+                q_vals = (features * w).sum(dim=1) + bb.view(-1)
+        else:
+            # Fallback: use zero task embedding
+            weight, bias = self.hypernetwork(torch.zeros(self.hypernetwork.latent_dim, device=features.device))
+            q_vals = torch.matmul(features, weight.t()) + bias
+            q_vals = q_vals.flatten()
+        
+        return q_vals
+
+
+def load_sac_dismantler_with_hypernet(F, H, K, gnn, device, latent_dim, ckpt_pth=None):
+    """
+    Load SAC networks with shared backbone and hypernetworks.
+    
+    Args:
+        F: num_features
+        H: num_heads
+        K: num_mps
+        gnn: GNN type
+        device: Device
+        latent_dim: Task embedding dimension
+        ckpt_pth: Optional checkpoint path
+    """
+    # Create hypernetworks for policy and Q-networks
+    hypernet = Hypernetwork(latent_dim, hidden_dim=128, output_dim=1, input_dim=256).to(device)
+    
+    # Create networks (same F, H, K, gnn as base SAC; shared hypernet for last layer)
+    policy = SACPolicyWithHypernetwork(F, H, K, gnn, hypernet).to(device)
+    qf1 = SACQNetworkWithHypernetwork(F, H, K, gnn, hypernet).to(device)
+    qf2 = SACQNetworkWithHypernetwork(F, H, K, gnn, hypernet).to(device)
+    qf1_target = SACQNetworkWithHypernetwork(F, H, K, gnn, hypernet).to(device)
+    qf2_target = SACQNetworkWithHypernetwork(F, H, K, gnn, hypernet).to(device)
+    
+    if ckpt_pth is not None:
+        ckpt = torch.load(ckpt_pth)
+        policy.load_state_dict(ckpt['policy_state_dict'])
+        qf1.load_state_dict(ckpt['qf1_state_dict'])
+        qf2.load_state_dict(ckpt['qf2_state_dict'])
+        qf1_target.load_state_dict(ckpt['qf1_target_state_dict'])
+        qf2_target.load_state_dict(ckpt['qf2_target_state_dict'])
+        # Load hypernetwork
+        hypernet.load_state_dict(ckpt.get('hypernet_state_dict', {}))
+    else:
+        # Initialize target networks with same weights
+        qf1_target.load_state_dict(qf1.state_dict())
+        qf2_target.load_state_dict(qf2.state_dict())
+    
+    return policy, qf1, qf2, qf1_target, qf2_target, hypernet

@@ -64,8 +64,11 @@ class Args:
     normalize: bool=True
     """apply instance normalization"""
     
-    train_dir: str = 'graphs/train/100_200_ER_LPA_COPY_rw_10000'
-    valid_dir: str = 'graphs/valid/valid'
+    # train_dir: str = 'graphs/train/100_200_ER_LPA_COPY_rw_10000'
+    # valid_dir: str = 'graphs/valid/valid'
+
+    train_dir: str = 'graphs/train/100_200_SBM_DCSBM_LPA_COPY_6000'
+    valid_dir: str = 'graphs/valid/100_200_SBM_DCSBM_LPA_COPY_60'
 
 
 
@@ -73,7 +76,7 @@ if __name__ == "__main__":
     args = tyro.cli(Args)
     now = datetime.now()
     time_string = now.strftime("%Y%m%d_%H%M%S")
-    run_path = f"{time_string}"
+    run_path = f"sac_train_{time_string}"
     device = torch.device(args.device)
 
     random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
@@ -145,7 +148,7 @@ if __name__ == "__main__":
             
             if args.use_tb:
                 writer.add_scalar("val/val_avg_auc", auc_val_avg, global_step)
-
+            
         if (global_step+1) % args.save_frequency == 0 and global_step>=args.learning_starts:
             directory = os.path.join('saved', run_path)
             if not os.path.exists(directory):
@@ -159,7 +162,7 @@ if __name__ == "__main__":
             
         if (global_step + 1) % 50 == 0:
             time_relative = str(timedelta(seconds=time.time() - start_time)).split('.')[0]
-            auc_avg = sum(auc_buffer)/len(auc_buffer)
+            auc_avg = sum(auc_buffer)/max(len(auc_buffer), 1)
             print(f"[{time_relative} | {num_eps} episodes | {global_step} steps] Avg. AUC = {auc_avg:.3f}")
             if args.use_tb:
                 writer.add_scalar("train/AUC", auc_avg, global_step)

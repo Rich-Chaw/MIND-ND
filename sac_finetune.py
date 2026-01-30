@@ -15,7 +15,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from env import DismantleEnv
 from networks.dismantle import load_sac_dismantler
-from utils import PriorReplayBuffer, Batch, validate,validate_with_type_logging, ig_to_data
+from utils import PriorReplayBuffer, Batch, validate,validate, ig_to_data
 import torch.nn.functional as F
 
 
@@ -301,7 +301,7 @@ if __name__ == "__main__":
             auc_buffer.append(logger.auc/logger.n_init)
         
         if global_step % args.val_frequency == 0 and global_step >= args.learning_starts:
-            val_auc_list = validate_with_type_logging(env_val, policy)[0]
+            val_auc_list = validate(env_val, policy)[0]
             auc_val_avg = sum(val_auc_list)/len(val_auc_list)
             print(f'At step {global_step}, Avg. Validation AUC is {auc_val_avg:.4f}')
             

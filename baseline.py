@@ -32,7 +32,7 @@ def is_terminal(G,threshold):
         return True
     else: return False
 
-def spectral(G, max_steps=None, threshold=None):
+def spectral_dismantling(G, max_steps=None, threshold=None):
     temp_G = G.copy()
     ensure_attribute(temp_G)
     removals = []
@@ -208,7 +208,7 @@ def adaptive_ci(G, max_steps=None, threshold=None):
     return removals
 
 
-def random(G, max_steps=None, threshold=None):
+def random_dismantling(G, max_steps=None, threshold=None):
     """Random dismantling for comparison"""
     temp_G = G.copy()
     ensure_attribute(temp_G)
@@ -376,9 +376,9 @@ def evaluate_sol(graph, removals):
 
 # Usage
 METHODS = {
-    "Random": random,
+    "Random": random_dismantling,
     "CoreHD": core_hd,
-    "Spectral": spectral,
+    "Spectral": spectral_dismantling,
     "Degree": adaptive_degree,
     "BPD": bpd_dismantling,
     "BetweennessNA": betweenness,
@@ -433,7 +433,7 @@ if __name__ == "__main__":
     
     # Define methods
     methods = {
-        "Spectral": spectral,
+        "Spectral": spectral_dismantling,
         "CoreHD": core_hd,
         "Adaptive Degree": adaptive_degree,
         "Random": random

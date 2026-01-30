@@ -380,7 +380,7 @@ if __name__ == "__main__":
                     writer.add_scalar("warmup/warmup_q_loss", warmup_q_loss.item(), warmup_step)
         
                 # Validate student performance after warmup
-                val_auc_list = validate_with_type_logging(env_val, policy)[0]
+                val_auc_list = validate(env_val, policy)[0]
                 auc_val_avg = sum(val_auc_list)/len(val_auc_list)
                 print(f'Warmup step {warmup_step}/{args.warmup_steps}, Avg. Validation AUC is {auc_val_avg:.4f}')
                 if args.use_tb:
@@ -503,7 +503,7 @@ if __name__ == "__main__":
             auc_buffer.append(logger.auc/logger.n_init)
         
         if global_step % args.val_frequency == 0 and global_step >= args.learning_starts:
-            val_auc_list = validate_with_type_logging(env_val, policy)[0]
+            val_auc_list = validate(env_val, policy)[0]
             auc_val_avg = sum(val_auc_list)/len(val_auc_list)
             print(f'At step {global_step}, Avg. Validation AUC is {auc_val_avg:.4f}')
             

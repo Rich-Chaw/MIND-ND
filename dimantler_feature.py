@@ -19,7 +19,7 @@ import seaborn as sns
 
 from env import DismantleEnv
 from networks.dismantle import load_sac_dismantler
-from utils import ReplayBuffer, PriorReplayBuffer, Batch, validate, validate_with_type_logging, ig_to_data, Discriminator, train_discriminator, DiscriminatorDataset
+from utils import ReplayBuffer, PriorReplayBuffer, Batch, validate, validate, ig_to_data, Discriminator, train_discriminator, DiscriminatorDataset
 import torch.nn.functional as F
 import gc
 from utils import graph_models
