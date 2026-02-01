@@ -270,10 +270,14 @@ def validate(env, policy, save_res=None, log_removals=False, task_encoder=None):
         return auc_list, robustness_list, lcc_curve_list
 
 
-def validate_step(obs_list,policy,device,step_size=1):
+def validate_step(obs_list,policy,task_encoder,device,step_size=1):
     with torch.no_grad():
         batch_data = Batch(device, [ig_to_data(g) for g in obs_list])
-        _, log_probs = policy.get_action(batch_data, val=True)
+        if task_encoder is not None:
+            z_batch = task_encoder.get_z(batch_data)
+            act_arr, log_probs = policy.get_action(batch_data, z=z_batch, val=True)
+        else:
+            act_arr, log_probs = policy.get_action(batch_data, val=True)
 
     # Convert to probabilities and get top-k nodes
     probs = log_probs.exp().cpu().numpy()
@@ -286,7 +290,7 @@ def validate_step(obs_list,policy,device,step_size=1):
         step_indices = [np.argmax(probs)]
     return step_indices #[B,step_size]
 
-def validate_one_graph(graph, policy, save_res=None, step_ratio=None, log_removals=False):
+def validate_one_graph(graph, policy, save_res=None, step_ratio=None, log_removals=False, task_encoder=None):
     """
     Validate policy on a single graph with optional step_ratio for batch node removal.
     """
@@ -306,13 +310,16 @@ def validate_one_graph(graph, policy, save_res=None, step_ratio=None, log_remova
         step_size = 1
 
     policy.eval()
+    if task_encoder is not None:
+        task_encoder.eval()
+        
     from env.env import DismantleEnv
     env = DismantleEnv(graph_data=[graph], batch_size=1, is_val=True)
     obs_list, _ = env.reset()
     finished = False
 
     while not finished:
-        step_indices = validate_step(obs_list,policy,device,step_size)
+        step_indices = validate_step(obs_list,policy,task_encoder, device,step_size)
         for idx in step_indices:
             if idx < obs_list[0].vcount(): #safety check
                 obs_next_list, rew_arr, done_arr, info_list = env.step(np.array([idx]))

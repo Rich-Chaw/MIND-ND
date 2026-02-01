@@ -9,13 +9,14 @@ from typing import Optional
 from collections import deque
 from dataclasses import dataclass
 import torch.nn as nn
+import json
 from torch_scatter import scatter_add, scatter_mean
 from datetime import datetime, timedelta
 from torch.nn.functional import mse_loss
 from torch.utils.tensorboard import SummaryWriter
 
 from env import DismantleEnv
-from networks.dismantle import load_sac_dismantler, load_sac_dismantler_with_hypernet
+from networks.dismantle import load_sac_dismantler, load_sac_dismantler_with_hypernet, load_sac_dismantler_with_film
 from networks.gnn import GNN_ENCODER
 from utils import ReplayBuffer, PriorReplayBuffer, Batch, validate, ig_to_data
 import torch.nn.functional as F
@@ -31,12 +32,12 @@ class Args:
     """random seed"""
     device: str='cuda:0'
     """the device to use"""
-    gnn: str='hgnn_v3'
+    gnn: str='hgnn_v4'
     num_envs: int=64
     """number of parallel environments,default 64"""
     total_steps: int=20000
     """number of training steps (transitions = steps*num_envs), default 200000"""
-    buffer_size: int=1500000
+    buffer_size: int=1000000
     """size of the replay buffer, default 2000000"""
     batch_size: int=64
     """batch size for updating network, default 512"""
@@ -88,10 +89,15 @@ class Args:
     """Initial reward shaping coefficient"""
 
     # Task_encoder_settings
+    task_encoder_fixed: bool = False
+    """Fix task encoder parameters"""
     latent_dim: int = 16
     """Task embedding dimension"""
     hidden_dim: int = 128
     """Hidden dimension"""
+
+    use_film: bool = False
+    """Use shared GNN + FiLM conditioning (policy/Q separate MLP heads) instead of hypernetwork"""
 
     regularization: bool = False
     regular_coeff: float = 1e-5
@@ -113,13 +119,69 @@ class Args:
 from finetune_utils import teacher_wrapper, teacher_step, compute_reward_shaping
 from task_encoder import TaskEncoder
 
+# Continuous learning: fix (do not update) weights outside [mean - n_std*std, mean + n_std*std] per layer.
+# n_std=1 keeps ~68% of weights trainable (most common setting).
+FIX_WEIGHTS_N_STD = 1.0
+
+
+def get_task_encoder_layer_stats_and_fix_masks(module, n_std=FIX_WEIGHTS_N_STD):
+    """
+    For each parameter in the task encoder, compute mean and std, print them, and build a boolean
+    mask of "large" weights to fix: |w| outside [mean - n_std*std, mean + n_std*std].
+    Returns list of (param, fix_mask) where fix_mask True = zero gradient (fixed).
+    """
+    fix_masks = []
+    for name, param in module.named_parameters():
+        if not param.requires_grad or param.dim() == 0:
+            continue
+        w = param.data.detach().float()
+        mean = w.mean().item()
+        std = w.std().item()
+        print(f"  task_encoder.{name}: mean={mean:.6f}, std={std:.6f}")
+        # Fix weights outside [mean - n_std*std, mean + n_std*std] (continuous learning convention)
+        # low = mean - n_std * (std + 1e-8)
+        # high = mean + n_std * (std + 1e-8)
+        # fix_mask = (w < low) | (w > high)
+        low = mean - n_std * (std + 1e-8)
+        fix_mask = (w > low) 
+        fix_masks.append((param, fix_mask))
+    return fix_masks
+
+
+def apply_fix_masks_to_task_encoder_grads(module, fix_masks):
+    """Zero out gradients for parameters at positions where fix_mask is True."""
+    for param, fix_mask in fix_masks:
+        if param.grad is not None and fix_mask is not None:
+            param.grad.data.masked_fill_(fix_mask, 0.0)
+
+
+def create_run_path_and_save_args(args):
+    now = datetime.now()
+    time_string = now.strftime("%Y%m%d_%H%M%S")
+    run_path = f"sac_graph_task"
+    if args.task_encoder_fixed:
+        run_path += "_fixed"
+    if args.use_film:
+        run_path += "_film"
+    if args.teacher_method:
+        run_path += f"_{args.teacher_method}"
+    if args.priority_type:
+        run_path += f"_{args.priority_type}"
+    run_path += f"_{time_string}"
+
+    directory = os.path.join('saved', run_path)
+    if not os.path.exists(directory):
+        os.makedirs(directory)
+    with open(os.path.join(directory, "args.json"), "w") as f:
+        json.dump(vars(args), f)
+    
+    return run_path, time_string
+
 
 if __name__ == "__main__":
     args = tyro.cli(Args)
     
-    now = datetime.now()
-    time_string = now.strftime("%Y%m%d_%H%M%S")
-    run_path = f"sac_teacher_{time_string}"
+    run_path, time_string = create_run_path_and_save_args(args)
     device = torch.device(args.device)
 
     random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
@@ -154,10 +216,18 @@ if __name__ == "__main__":
     
     buffer = PriorReplayBuffer(args.buffer_size, device)
 
-    # Load network 
-    policy, qf1, qf2, qf1_target, qf2_target, hypernet = load_sac_dismantler_with_hypernet(
-        args.num_features, args.num_heads, args.num_mps, args.gnn, device, args.latent_dim, args.ckpt_pth
-    )
+    # Load network (hypernetwork or FiLM variant)
+    hypernet = None
+    film_generator = None
+    if args.use_film:
+        policy, qf1, qf2, qf1_target, qf2_target, film_generator = load_sac_dismantler_with_film(
+            args.num_features, args.num_heads, args.num_mps, args.gnn, device, args.latent_dim, args.ckpt_pth
+        )
+        print("Using shared GNN + FiLM conditioning (policy/Q separate MLP heads).")
+    else:
+        policy, qf1, qf2, qf1_target, qf2_target, hypernet = load_sac_dismantler_with_hypernet(
+            args.num_features, args.num_heads, args.num_mps, args.gnn, device, args.latent_dim, args.ckpt_pth
+        )
     task_encoder = TaskEncoder(
         args.num_features, args.num_heads, args.num_mps, args.gnn,
         hidden_dim=args.hidden_dim, latent_dim=args.latent_dim,
@@ -167,6 +237,25 @@ if __name__ == "__main__":
         if "task_encoder_state_dict" in ckpt:
             task_encoder.load_state_dict(ckpt["task_encoder_state_dict"])
         print(f"Loaded checkpoint: {args.ckpt_pth}")
+    else:
+        ckpt = torch.load("saved/task_encoder/task_encoder_best.ckpt", map_location=device)
+        task_encoder.load_state_dict(ckpt["encoder_state_dict"])
+        print(f"Loaded task encoder from saved/task_encoder/task_encoder_best.ckpt")
+
+    # Freeze task encoder: no gradients, not updated by optimizer
+    if args.task_encoder_fixed:
+        for p in task_encoder.parameters():
+            p.requires_grad = False
+        print("Task encoder parameters fixed (frozen).")
+        task_encoder_fix_masks = None
+        task_encoder_optimizer = None
+    else:
+        print("Task encoder parameters not fixed; fixing large weights per layer (mean ± n_std*std).")
+        print("Task encoder weight stats (layer by layer):")
+        task_encoder_fix_masks = get_task_encoder_layer_stats_and_fix_masks(task_encoder, n_std=FIX_WEIGHTS_N_STD)
+        task_encoder_optimizer = torch.optim.Adam(
+            [p for p in task_encoder.parameters() if p.requires_grad], lr=args.learning_rate, eps=1e-4
+        )
 
     print(f"Teacher method: {args.teacher_method}")
     print(f"Priority sampling: {args.priority_type}")
@@ -201,15 +290,17 @@ if __name__ == "__main__":
     lr = args.learning_rate
     print(f'Using learning rate: {lr}')
     
-    # Only optimize trainable parameters (hypernet shared by policy and Q, so include in both)
-    q_params = [p for p in list(qf1.graph_embedding.parameters()) + list(qf2.graph_embedding.parameters()) if p.requires_grad]
-    policy_params = [p for p in policy.graph_embedding.parameters() if p.requires_grad]
-    hypernet_params = [p for p in hypernet.parameters() if p.requires_grad]
-    task_encoder_params = [p for p in task_encoder.parameters() if p.requires_grad]
+    # Only optimize trainable parameters (shared GNN when use_film; conditioning module in both optimizers)
+    if args.use_film:
+        q_params = [p for p in list(qf1.graph_embedding.parameters()) + list(qf1.mlp.parameters()) + list(qf2.mlp.parameters()) if p.requires_grad]
+    else:
+        q_params = [p for p in list(qf1.graph_embedding.parameters()) + list(qf2.graph_embedding.parameters()) + list(qf1.mlp.parameters()) + list(qf2.mlp.parameters()) if p.requires_grad]
+    policy_params = [p for p in list(policy.graph_embedding.parameters()) + list(policy.mlp.parameters()) if p.requires_grad]
+    cond_module = film_generator if film_generator is not None else hypernet
+    cond_params = [p for p in cond_module.parameters() if p.requires_grad] if cond_module is not None else []
 
-    q_optimizer = torch.optim.Adam(q_params + hypernet_params, lr=lr, eps=1e-4)
-    policy_optimizer = torch.optim.Adam(policy_params + hypernet_params, lr=lr, eps=1e-4)
-    task_encoder_optimizer = torch.optim.Adam(task_encoder_params, lr=lr, eps=1e-4)
+    q_optimizer = torch.optim.Adam(q_params + cond_params, lr=lr, eps=1e-4)
+    policy_optimizer = torch.optim.Adam(policy_params + cond_params, lr=lr, eps=1e-4)
     
     num_eps, num_updates = 0, 0
     auc_buffer = deque(maxlen=20)
@@ -289,19 +380,23 @@ if __name__ == "__main__":
             directory = os.path.join('saved', run_path)
             if not os.path.exists(directory):
                 os.makedirs(directory)
-            torch.save({
+            ckpt = {
                 "policy_state_dict": policy.state_dict(),
                 "qf1_state_dict": qf1.state_dict(),
                 "qf2_state_dict": qf2.state_dict(),
                 "qf1_target_state_dict": qf1_target.state_dict(),
                 "qf2_target_state_dict": qf2_target.state_dict(),
-                "hypernet_state_dict": hypernet.state_dict(),
                 "task_encoder_state_dict": task_encoder.state_dict(),
-            }, os.path.join(directory, f'{global_step}.ckpt'))
+            }
+            if film_generator is not None:
+                ckpt["film_generator_state_dict"] = film_generator.state_dict()
+            if hypernet is not None:
+                ckpt["hypernet_state_dict"] = hypernet.state_dict()
+            torch.save(ckpt, os.path.join(directory, f'{global_step}.ckpt'))
             
         if (global_step + 1) % 50 == 0: #log train AUC
             time_relative = str(timedelta(seconds=time.time() - start_time)).split('.')[0]
-            auc_avg = sum(auc_buffer)/len(auc_buffer)
+            auc_avg = sum(auc_buffer)/max(len(auc_buffer), 1)
             print(f"[{time_relative} | {num_eps} episodes | {global_step} steps] Avg. AUC = {auc_avg:.3f} (Priority Finetuning)")
             if args.use_tb:
                 writer.add_scalar("train/AUC", auc_avg, global_step)
@@ -396,10 +491,15 @@ if __name__ == "__main__":
                     policy_l2_reg = sum(torch.norm(p, p=2) ** 2 for p in policy.parameters() if p.requires_grad)
                     policy_loss = policy_loss + args.regular_coeff * policy_l2_reg
                 
-                policy_optimizer.zero_grad(); task_encoder_optimizer.zero_grad()
+                policy_optimizer.zero_grad()
+                if task_encoder_optimizer is not None:
+                    task_encoder_optimizer.zero_grad()
                 policy_loss.backward()
+                if task_encoder_fix_masks is not None:
+                    apply_fix_masks_to_task_encoder_grads(task_encoder, task_encoder_fix_masks)
                 policy_optimizer.step()
-                task_encoder_optimizer.step()
+                if task_encoder_optimizer is not None:
+                    task_encoder_optimizer.step()
 
                 # Explicit cleanup of training tensors
                 del obs_b, act_b, obs_next_b, rew_b, done_b
@@ -427,5 +527,5 @@ if __name__ == "__main__":
                 gc.collect()
                 gc.collect()  # Double collection for stubborn references
 # Example usage:
-# ython sac_task_v2.py --use_tb --device cuda:0
-# python sac_task_v2.py --use_tb --device cuda:0 --teacher_method betweenness --demonstrate --reward_shaping
+# python sac_graph_task.py --use_tb --device cuda:0
+# python sac_graph_task.py --use_tb --device cuda:0 --teacher_method betweenness --demonstrate --reward_shaping

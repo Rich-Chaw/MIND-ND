@@ -18,6 +18,7 @@ from networks.dismantle import load_sac_dismantler
 from utils import ReplayBuffer, PriorReplayBuffer, Batch, validate, validate, ig_to_data
 import torch.nn.functional as F
 import gc
+import json
 
 
 
@@ -29,7 +30,7 @@ class Args:
     """random seed"""
     device: str='cuda:0'
     """the device to use"""
-    gnn: str='hgnn_v3'
+    gnn: str='hgnn_v4'
     num_envs: int=64
     """number of parallel environments,default 64"""
     total_steps: int=20000
@@ -104,12 +105,26 @@ class Args:
 
 from finetune_utils import teacher_wrapper, teacher_step, compute_reward_shaping
 
+def create_run_path_and_save_args(args):
+    now = datetime.now()
+    time_string = now.strftime("%Y%m%d_%H%M%S")
+    run_path = f"sac_teacher"
+    if args.teacher_method:
+        run_path += f"_{args.teacher_method}"
+    if args.priority_type:
+        run_path += f"_{args.priority_type}"
+    run_path += f"_{time_string}"
+
+    with open(os.path.join("saved", run_path, "args.json"), "w") as f:
+        json.dump(vars(args), f)
+    
+    return run_path, time_string
+
+
 if __name__ == "__main__":
     args = tyro.cli(Args)
     
-    now = datetime.now()
-    time_string = now.strftime("%Y%m%d_%H%M%S")
-    run_path = f"sac_teacher_{time_string}"
+    run_path, time_string = create_run_path_and_save_args(args)
     device = torch.device(args.device)
 
     random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
@@ -272,7 +287,7 @@ if __name__ == "__main__":
             
         if (global_step + 1) % 50 == 0: #log train AUC
             time_relative = str(timedelta(seconds=time.time() - start_time)).split('.')[0]
-            auc_avg = sum(auc_buffer)/len(auc_buffer)
+            auc_avg = sum(auc_buffer)/max(len(auc_buffer), 1)
             print(f"[{time_relative} | {num_eps} episodes | {global_step} steps] Avg. AUC = {auc_avg:.3f} (Priority Finetuning)")
             if args.use_tb:
                 writer.add_scalar("train/AUC", auc_avg, global_step)

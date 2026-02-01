@@ -15,6 +15,7 @@ from torch.utils.tensorboard import SummaryWriter
 from env import DismantleEnv
 from networks.dismantle import load_sac_dismantler
 from utils import ReplayBuffer, Batch, validate, ig_to_data
+import json
 
 
 
@@ -70,13 +71,26 @@ class Args:
     train_dir: str = 'graphs/train/100_200_SBM_DCSBM_LPA_COPY_6000'
     valid_dir: str = 'graphs/valid/100_200_SBM_DCSBM_LPA_COPY_60'
 
+def create_run_path_and_save_args(args):
+    now = datetime.now()
+    time_string = now.strftime("%Y%m%d_%H%M%S")
+    run_path = f"sac_teacher"
+    if args.teacher_method:
+        run_path += f"_{args.teacher_method}"
+    if args.priority_type:
+        run_path += f"_{args.priority_type}"
+    run_path += f"_{time_string}"
+
+    with open(os.path.join("saved", run_path, "args.json"), "w") as f:
+        json.dump(vars(args), f)
+    
+    return run_path, time_string
 
 
 if __name__ == "__main__":
     args = tyro.cli(Args)
-    now = datetime.now()
-    time_string = now.strftime("%Y%m%d_%H%M%S")
-    run_path = f"sac_train_{time_string}"
+    
+    run_path, time_string = create_run_path_and_save_args(args)
     device = torch.device(args.device)
 
     random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)

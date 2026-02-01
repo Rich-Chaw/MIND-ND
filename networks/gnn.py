@@ -110,6 +110,7 @@ from networks.gcnii import GCNII
 from networks.hgnn import HGNN
 from networks.hgnn_v2 import HGNN_V2
 from networks.hgnn_v3 import HGNN_V3
+from networks.hgnn_v4 import HGNN_V4
 
 GNN_ENCODER = {
     'gcn':GCN,
@@ -125,6 +126,7 @@ GNN_ENCODER = {
     'hgnn': HGNN,
     'hgnn_v2': HGNN_V2,
     'hgnn_v3': HGNN_V3,
+    'hgnn_v4': HGNN_V4,
 }
 
 if __name__ == '__main__':

@@ -69,3 +69,72 @@ class Hypernetwork(nn.Module):
 
         return weight, bias
 
+
+class FiLMGenerator(nn.Module):
+    """
+    FiLM (Feature-wise Linear Modulation) generator: from task embedding z, outputs
+    (gamma, beta) pairs for conditioning MLP hidden layers. One set for Policy MLP,
+    one set for Critic (Q) MLP. Applied as: out = gamma * hidden + beta (per layer).
+    """
+    def __init__(self, latent_dim, hidden_dim=128, film_hidden_dim=256, num_film_layers=2):
+        """
+        Args:
+            latent_dim: Task embedding dimension
+            hidden_dim: Hidden size of the generator MLP
+            film_hidden_dim: Hidden size of the target MLP layers to modulate (256)
+            num_film_layers: Number of hidden layers to modulate (2 for 3-layer MLP: 256, 256)
+        """
+        super().__init__()
+        self.latent_dim = latent_dim
+        self.film_hidden_dim = film_hidden_dim
+        self.num_film_layers = num_film_layers
+        # Per-layer: gamma and beta, each [film_hidden_dim]. Two heads: policy and critic.
+        out_per_head = num_film_layers * film_hidden_dim * 2  # gamma and beta per layer
+        self._out_per_head = out_per_head
+
+        self.policy_net = nn.Sequential(
+            nn.Linear(latent_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, out_per_head),
+        )
+        self.critic_net = nn.Sequential(
+            nn.Linear(latent_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, out_per_head),
+        )
+
+    def forward(self, z):
+        """
+        Args:
+            z: [batch_size, latent_dim]
+
+        Returns:
+            policy_film: list of (gamma, beta) each [B, film_hidden_dim], length num_film_layers
+            critic_film: list of (gamma, beta) each [B, film_hidden_dim], length num_film_layers
+        """
+        if z.dim() == 1:
+            z = z.unsqueeze(0)
+        B = z.shape[0]
+        D = self.film_hidden_dim
+        L = self.num_film_layers
+
+        p_flat = self.policy_net(z)   # [B, L*D*2]
+        c_flat = self.critic_net(z)  # [B, L*D*2]
+
+        policy_film = []
+        for i in range(L):
+            g = p_flat[:, i * D * 2 : i * D * 2 + D].view(B, D)
+            b = p_flat[:, i * D * 2 + D : (i + 1) * D * 2].view(B, D)
+            policy_film.append((g, b))
+        critic_film = []
+        for i in range(L):
+            g = c_flat[:, i * D * 2 : i * D * 2 + D].view(B, D)
+            b = c_flat[:, i * D * 2 + D : (i + 1) * D * 2].view(B, D)
+            critic_film.append((g, b))
+
+        return policy_film, critic_film
+
