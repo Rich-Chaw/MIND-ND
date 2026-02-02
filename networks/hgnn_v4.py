@@ -18,7 +18,7 @@ from utils.graph_data import Batch
 
 class LeanHybridConvV4(MessagePassing):
     def __init__(self, in_channels, out_channels, alpha=0.1, theta=0.5, layer=1):
-        super(LeanHybridConvV4, self).__init__(aggr='sum')
+        super(LeanHybridConvV4, self).__init__(aggr='add')
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.alpha = alpha  # Initial residual weight

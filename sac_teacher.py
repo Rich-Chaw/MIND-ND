@@ -115,8 +115,11 @@ def create_run_path_and_save_args(args):
         run_path += f"_{args.priority_type}"
     run_path += f"_{time_string}"
 
-    with open(os.path.join("saved", run_path, "args.json"), "w") as f:
-        json.dump(vars(args), f)
+    directory = os.path.join('saved', run_path)
+    if not os.path.exists(directory):
+        os.makedirs(directory)
+    with open(os.path.join(directory, "args.json"), "w") as f:
+        json.dump(vars(args), f, indent=4)
     
     return run_path, time_string
 

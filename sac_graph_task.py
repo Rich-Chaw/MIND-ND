@@ -89,15 +89,28 @@ class Args:
     """Initial reward shaping coefficient"""
 
     # Task_encoder_settings
-    task_encoder_fixed: bool = False
-    """Fix task encoder parameters"""
+    task_encoder_pretrained_ckpt_pth: Optional[str]=None
+    """where task encoder pretrained checkpoint was saved"""
+    fix_type: str = 'none'
+    """Fix task encoder parameters: 'none', 'frozen', 'ewc'"""
     latent_dim: int = 16
     """Task embedding dimension"""
     hidden_dim: int = 128
     """Hidden dimension"""
+    # EWC (Fisher) when task_encoder_fixed=False: anchor + Fisher from train_dir, then L_total = L_B + (lambda/2)*sum_i F_i*(theta_i - theta_A_i)^2
+    ewc_lambda: float = 1000.0
+    """EWC penalty coefficient (lambda)"""
+    fisher_batch_size: int = 64
+    """Batch size for Fisher computation over train_dir"""
+    fisher_n_batches: int = 100
+    """Number of batches to estimate Fisher E[grad^2]"""
+    fisher_temperature: float = 0.2
+    """Temperature for InfoNCE loss when computing Fisher"""
 
     use_film: bool = False
     """Use shared GNN + FiLM conditioning (policy/Q separate MLP heads) instead of hypernetwork"""
+    use_hypernet: bool = False
+    """Use hypernetwork"""
 
     regularization: bool = False
     regular_coeff: float = 1e-5
@@ -112,57 +125,76 @@ class Args:
     """apply instance normalization"""
 
     # dataset directories
-    train_dir: str = 'graphs/train/100_150_SBM_DCSBM_LPA_COPY_ER_6000'
+    train_dir: str = 'graphs/train/100_150_SBM_DCSBM_LPA_COPY_ER_6000_copy'
     valid_dir: str = 'graphs/valid/100_150_SBM_DCSBM_LPA_COPY_ER_60'
 
 
 from finetune_utils import teacher_wrapper, teacher_step, compute_reward_shaping
-from task_encoder import TaskEncoder
+from task_encoder import TaskEncoder, build_graphs_and_groups, info_nce_loss_same_group
 
-# Continuous learning: fix (do not update) weights outside [mean - n_std*std, mean + n_std*std] per layer.
-# n_std=1 keeps ~68% of weights trainable (most common setting).
-FIX_WEIGHTS_N_STD = 1.0
+# EWC: Fisher diagonal F_i = E[(dL/d theta_i)^2], anchor theta_A^*. Loss = L_B + (lambda/2) * sum_i F_i (theta_i - theta_A_i)^2
 
 
-def get_task_encoder_layer_stats_and_fix_masks(module, n_std=FIX_WEIGHTS_N_STD):
+def compute_fisher_and_anchor(task_encoder, train_dir, device, batch_size, n_batches, temperature, seed=0):
     """
-    For each parameter in the task encoder, compute mean and std, print them, and build a boolean
-    mask of "large" weights to fix: |w| outside [mean - n_std*std, mean + n_std*std].
-    Returns list of (param, fix_mask) where fix_mask True = zero gradient (fixed).
+    Compute diagonal Fisher F = E[grad(L)^2] and save anchor theta_A^* using training data from train_dir.
+    Pass data through task encoder with InfoNCE loss (same as pretraining), then F_i = mean over batches of (dL/d theta_i)^2.
+    Returns (fisher_dict, anchor_dict): name -> tensor (same shape as param), on device.
     """
-    fix_masks = []
-    for name, param in module.named_parameters():
-        if not param.requires_grad or param.dim() == 0:
-            continue
-        w = param.data.detach().float()
-        mean = w.mean().item()
-        std = w.std().item()
-        print(f"  task_encoder.{name}: mean={mean:.6f}, std={std:.6f}")
-        # Fix weights outside [mean - n_std*std, mean + n_std*std] (continuous learning convention)
-        # low = mean - n_std * (std + 1e-8)
-        # high = mean + n_std * (std + 1e-8)
-        # fix_mask = (w < low) | (w > high)
-        low = mean - n_std * (std + 1e-8)
-        fix_mask = (w > low) 
-        fix_masks.append((param, fix_mask))
-    return fix_masks
+    graphs, group_ids = build_graphs_and_groups(train_dir)
+    n = len(graphs)
+    if n == 0:
+        raise FileNotFoundError(f"No graphs with known types in {train_dir}")
+    rng = np.random.default_rng(seed)
+    task_encoder.train()
+    fisher_sums = {}
+    n_used = 0
+    for step in range(n_batches):
+        task_encoder.zero_grad()
+        idx = rng.integers(0, n, size=min(batch_size, n))
+        batch_graphs = [graphs[i] for i in idx]
+        batch_groups = torch.as_tensor(group_ids[idx], device=device, dtype=torch.long)
+        batch = Batch(device, [ig_to_data(gr) for gr in batch_graphs])
+        z = task_encoder(batch)
+        loss = info_nce_loss_same_group(z, batch_groups, temperature=temperature)
+        if loss.requires_grad:
+            loss.backward()
+            for name, param in task_encoder.named_parameters():
+                if param.grad is not None:
+                    g2 = param.grad.data.clone().detach().float().pow(2)
+                    if name not in fisher_sums:
+                        fisher_sums[name] = g2.clone()
+                    else:
+                        fisher_sums[name] = fisher_sums[name] + g2
+            n_used += 1
+    if n_used == 0:
+        raise RuntimeError("Fisher computation: no batch produced a valid gradient (e.g. InfoNCE had no positives).")
+    fisher_dict = {name: (fisher_sums[name] / n_used) for name in fisher_sums}
+    anchor_dict = {name: param.data.clone().detach().float() for name, param in task_encoder.named_parameters()}
+    print(f"  Fisher and anchor computed over {n_used} batches (train_dir).")
+    return fisher_dict, anchor_dict
 
 
-def apply_fix_masks_to_task_encoder_grads(module, fix_masks):
-    """Zero out gradients for parameters at positions where fix_mask is True."""
-    for param, fix_mask in fix_masks:
-        if param.grad is not None and fix_mask is not None:
-            param.grad.data.masked_fill_(fix_mask, 0.0)
+def ewc_penalty(task_encoder, fisher_dict, anchor_dict, ewc_lambda):
+    """L_EWC = (lambda/2) * sum_i F_i (theta_i - theta_A_i)^2 (per-weight, then sum)."""
+    loss = 0.0
+    for name, param in task_encoder.named_parameters():
+        if name in fisher_dict and name in anchor_dict:
+            diff = (param - anchor_dict[name].to(param.device)).float()
+            loss = loss + (ewc_lambda / 2.0) * (fisher_dict[name].to(param.device) * diff * diff).sum()
+    return loss
 
 
 def create_run_path_and_save_args(args):
     now = datetime.now()
     time_string = now.strftime("%Y%m%d_%H%M%S")
-    run_path = f"sac_graph_task"
-    if args.task_encoder_fixed:
-        run_path += "_fixed"
+    run_path = os.path.join(args.gnn,"sac_graph_task")
+    if args.fix_type:
+        run_path += f"_{args.fix_type}"
     if args.use_film:
         run_path += "_film"
+    elif args.use_hypernet:
+        run_path += "_hypernet"
     if args.teacher_method:
         run_path += f"_{args.teacher_method}"
     if args.priority_type:
@@ -224,10 +256,12 @@ if __name__ == "__main__":
             args.num_features, args.num_heads, args.num_mps, args.gnn, device, args.latent_dim, args.ckpt_pth
         )
         print("Using shared GNN + FiLM conditioning (policy/Q separate MLP heads).")
-    else:
+    elif args.use_hypernet:
         policy, qf1, qf2, qf1_target, qf2_target, hypernet = load_sac_dismantler_with_hypernet(
             args.num_features, args.num_heads, args.num_mps, args.gnn, device, args.latent_dim, args.ckpt_pth
         )
+        print("Using shared GNN + hypernetwork (policy/Q separate MLP heads).")
+    
     task_encoder = TaskEncoder(
         args.num_features, args.num_heads, args.num_mps, args.gnn,
         hidden_dim=args.hidden_dim, latent_dim=args.latent_dim,
@@ -237,22 +271,35 @@ if __name__ == "__main__":
         if "task_encoder_state_dict" in ckpt:
             task_encoder.load_state_dict(ckpt["task_encoder_state_dict"])
         print(f"Loaded checkpoint: {args.ckpt_pth}")
-    else:
+    elif args.task_encoder_pretrained_ckpt_pth:
         ckpt = torch.load("saved/task_encoder/task_encoder_best.ckpt", map_location=device)
         task_encoder.load_state_dict(ckpt["encoder_state_dict"])
         print(f"Loaded task encoder from saved/task_encoder/task_encoder_best.ckpt")
 
     # Freeze task encoder: no gradients, not updated by optimizer
-    if args.task_encoder_fixed:
+    if args.fix_type == 'frozen':
         for p in task_encoder.parameters():
             p.requires_grad = False
         print("Task encoder parameters fixed (frozen).")
-        task_encoder_fix_masks = None
+        ewc_fisher = None
+        ewc_anchor = None
         task_encoder_optimizer = None
+    elif args.fix_type == 'ewc':
+        print("Task encoder not fixed: computing Fisher and anchor from train_dir (EWC).")
+        ewc_fisher, ewc_anchor = compute_fisher_and_anchor(
+            task_encoder, args.train_dir, device,
+            batch_size=args.fisher_batch_size,
+            n_batches=args.fisher_n_batches,
+            temperature=args.fisher_temperature,
+            seed=args.seed,
+        )
+        task_encoder_optimizer = torch.optim.Adam(
+            [p for p in task_encoder.parameters() if p.requires_grad], lr=args.learning_rate, eps=1e-4
+        )
     else:
-        print("Task encoder parameters not fixed; fixing large weights per layer (mean ± n_std*std).")
-        print("Task encoder weight stats (layer by layer):")
-        task_encoder_fix_masks = get_task_encoder_layer_stats_and_fix_masks(task_encoder, n_std=FIX_WEIGHTS_N_STD)
+        print("Task encoder parameters not fixed.")
+        ewc_fisher = None
+        ewc_anchor = None
         task_encoder_optimizer = torch.optim.Adam(
             [p for p in task_encoder.parameters() if p.requires_grad], lr=args.learning_rate, eps=1e-4
         )
@@ -491,12 +538,14 @@ if __name__ == "__main__":
                     policy_l2_reg = sum(torch.norm(p, p=2) ** 2 for p in policy.parameters() if p.requires_grad)
                     policy_loss = policy_loss + args.regular_coeff * policy_l2_reg
                 
+                # EWC: L_total = L_B + (lambda/2) * sum_i F_i (theta_i - theta_A_i)^2
+                if ewc_anchor is not None and ewc_fisher is not None:
+                    policy_loss = policy_loss + ewc_penalty(task_encoder, ewc_fisher, ewc_anchor, args.ewc_lambda)
+                
                 policy_optimizer.zero_grad()
                 if task_encoder_optimizer is not None:
                     task_encoder_optimizer.zero_grad()
                 policy_loss.backward()
-                if task_encoder_fix_masks is not None:
-                    apply_fix_masks_to_task_encoder_grads(task_encoder, task_encoder_fix_masks)
                 policy_optimizer.step()
                 if task_encoder_optimizer is not None:
                     task_encoder_optimizer.step()
