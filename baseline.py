@@ -1,6 +1,7 @@
 import matplotlib.pyplot as plt
 import numpy as np
 import igraph as ig
+import networkx as nx
 from scipy.sparse.linalg import eigsh
 from copy import deepcopy
 from typing import Callable, Dict
@@ -13,8 +14,8 @@ def ensure_attribute(graph):
     if 'static_id' not in graph.vs.attributes():
         graph.vs['static_id'] = list(range(graph.vcount()))
     
-    if 'n_init' not in graph.vs.attributes():
-        graph.vs['n_init'] = graph.vcount()
+    if 'n_init' not in graph.attributes():
+        graph['n_init'] = graph.vcount()
 
 def get_lcc_size(graph):
     """Get the size of the largest connected component"""
@@ -281,98 +282,80 @@ def bpd_dismantling(G, max_steps=None, threshold=None):
         
     return removals
 
-def evaluate_sol(graph, removals):
+def evaluate_sol(graph, removals, use_vertex_index=False):
     '''
     Evaluate a dismantling solution by computing AUC and robustness
-    
+
     Args:
         graph: igraph.Graph object
         removals: list of node indices in removal order
-    
     Returns:
         auc: Area under the curve (using Simpson's rule) in MIND
         robustness: Robustness metric following FINDER C++ getRobustness implementation
     '''
     if len(removals) == 0:
         print("empty removal when evaluate sol")
-        return 0.0 ,0.0
+        return 0.0, 0.0
 
     from scipy.integrate import simpson
-    
+
     temp_G = graph.copy()
     ensure_attribute(temp_G)
-    n_init = temp_G.vcount()
-    
-    # Track LCC size at each step (normalized)
+    n_init = temp_G['n_init']
     gcc_eps = []
-    
-    # Remove nodes one by one and track LCC after each removal
+
     for node_id in removals:
         if temp_G.vcount() == 0:
             break
+        node_id = int(node_id)
+        vertex_idx = [i for i, v in enumerate(temp_G.vs) if v['static_id'] == node_id][0]
+        temp_G.delete_vertices(vertex_idx)
         
-        # Find the vertex with matching static_id
-        try:
-            vertex_idx = [i for i, v in enumerate(temp_G.vs) if v['static_id'] == node_id][0]
-            temp_G.delete_vertices(vertex_idx)
-            
-            # Calculate normalized LCC size after removal
-            if temp_G.vcount() > 0:
-                lcc_size = get_lcc_size(temp_G) / n_init
-            else:
-                lcc_size = 0.0
-            gcc_eps.append(lcc_size)
-        except (IndexError, KeyError):
-            # Node already removed or doesn't exist
-            continue
-    
-    auc = simpson(gcc_eps, dx=1)
-    robustness = sum(gcc_eps[::-1][:-1]) / n_init
-    
-    # Calculate robustness using the same method as FINDER C++ getRobustness
-    # Start with empty graph and add nodes back in reverse order
-    # active_nodes = set()
-    # total_max_num = 0.0
-    
-    # # Process removals in reverse order (last removed first)
-    # for node_id in reversed(removals):
-    #     # Add node back to active set
-    #     active_nodes.add(node_id)
-        
-    #     # Create subgraph with active nodes and their edges
-    #     if len(active_nodes) > 0:
-    #         # Find vertices that correspond to active nodes
-    #         active_vertex_indices = [i for i, v in enumerate(graph.vs) if v['static_id'] in active_nodes]
-    #         if len(active_vertex_indices) > 0:
-    #             subgraph = graph.induced_subgraph(active_vertex_indices)
-              
-    #     # Add edges involving this node if both endpoints are active
-    #     edges_to_add = []
-    #     for u, v in original_edges:
-    #         orig_u = graph.vs[u]['static_id']
-    #         orig_v = graph.vs[v]['static_id']
-            
-    #         if orig_u == node_id and orig_v in active_nodes:
-    #             edges_to_add.append((orig_u, orig_v))
-    #         elif orig_v == node_id and orig_u in active_nodes:
-    #             edges_to_add.append((orig_u, orig_v))
-        
-    #     # Create subgraph with active nodes and their edges
-    #     if len(active_nodes) > 0:
-    #         subgraph = graph.induced_subgraph([i for i, v in enumerate(graph.vs) if v['static_id'] in active_nodes])
-    #         if subgraph.vcount() > 0:
-    #             lcc_size = get_lcc_size(subgraph)  # Absolute LCC size (not normalized)
-    #             total_max_num += lcc_size
-    
-    # # Subtract final LCC size (when all nodes are back)
-    # if len(active_nodes) > 0:
-    #     final_lcc_size = get_lcc_size(graph)
-    #     total_max_num -= final_lcc_size
-    
-    # # Normalize by n^2 as in C++ implementation
-    # robustness = total_max_num / (n_init * n_init)
-    
+        # Calculate normalized LCC size after removal
+        if temp_G.vcount() > 0:
+            lcc_size = get_lcc_size(temp_G)
+        else:
+            lcc_size = 0.0
+        gcc_eps.append(lcc_size/n_init)
+
+
+    auc = simpson(gcc_eps, dx=1) if gcc_eps else 0.0
+    # robustness = sum(gcc_eps[::-1][:-1]) / n_init
+    robustness = sum(gcc_eps) / n_init if gcc_eps else 0.0
     return auc, robustness
+
+def igraph_to_networkx(graph):
+    edgelist = graph.get_edgelist()
+    graph = nx.Graph()
+    graph.add_edges_from(edgelist)
+    return graph
+
+def evaluate_sol_networkx(graph, removals):
+    graph = igraph_to_networkx(graph)
+    # Calculate robustness in forward order (same as EvaluateSol)
+    # This removes nodes one by one and tracks the largest connected component
+    graph_test = graph.copy()
+    num_nodes = graph.number_of_nodes()
+    total_max_num = 0.0
+    max_wcc_sz_list_forward = []
+    # Remove nodes in forward order (same as dismantling process)
+    for node in removals:
+        # Remove the node from the graph
+        if node in graph_test:
+            graph_test.remove_node(node)
+        
+        # Find the largest connected component after removal
+        if graph_test.number_of_nodes() > 0:
+            max_cc_size = max(len(c) for c in nx.connected_components(graph_test))
+        else:
+            max_cc_size = 0
+        
+        total_max_num += max_cc_size
+        max_wcc_sz_list_forward.append(max_cc_size / num_nodes)
+    robustness = total_max_num / (num_nodes * num_nodes)
+    
+    return robustness
+
 
 # Usage
 METHODS = {
@@ -407,14 +390,19 @@ def baseline_dismantling(graph, methods,max_steps=None,visualize=False):
 
 #-----------------------------------------------------------------
 # Import FINDER methods
-def finder_wrapper(graph, max_steps=None):
-    from baseline_rl.finder import finder
-    removals, score, MaxCCList = finder(graph)
-    auc, robustness = evaluate_sol(graph, removals)
+def FINDER_dismantling(graph, max_steps=None):
+    from baseline_rl.FINDER import FINDER_wrapper
+    removals, score, MaxCCList = FINDER_wrapper(graph)
+    return removals
+
+def NIRM_dismantling(graph, max_steps=None):
+    from baseline_rl.NIRM import NIRM_wrapper
+    removals, score, MaxCCList = NIRM_wrapper(graph)
     return removals
 
 METHODS.update({
-    "FINDER": finder_wrapper
+    "FINDER": FINDER_dismantling,
+    "NIRM": NIRM_dismantling
 })
 
 
@@ -436,7 +424,7 @@ if __name__ == "__main__":
         "Spectral": spectral_dismantling,
         "CoreHD": core_hd,
         "Adaptive Degree": adaptive_degree,
-        "Random": random
+        "Random": random_dismantling
     }
     
     # Test different graph types

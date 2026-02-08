@@ -60,9 +60,10 @@ class MINDConv(nn.Module):
 
 
 class MIND(nn.Module):
-    def __init__(self, num_features, num_heads, num_mps):
+    def __init__(self, num_features, num_heads, num_mps, positional_encoding=None):
         super().__init__()
         self.num_features = num_features # F
+        self.positional_encoding = positional_encoding
         self.register_buffer("x_init", torch.ones(1, num_features))
         self.num_mps = num_mps # K layers
         self.convs = nn.ModuleList([MINDConv(num_features, num_heads) for _ in range(num_mps)])
@@ -75,7 +76,11 @@ class MIND(nn.Module):
         # (N+B,KF)
         x_profile = torch.empty(g.total_nodes, self.num_features*self.num_mps, device=self.x_init.device)
         # (N+B,F)
-        x_k = self.x_init.expand(g.total_nodes, -1)
+        if self.positional_encoding == 'RW':
+            from utils.graph_data import random_walk_positional_encoding
+            x_k = random_walk_positional_encoding(g, self.num_features, self.x_init.device)
+        else:
+            x_k = self.x_init.expand(g.total_nodes, -1)
         for k, conv in enumerate(self.convs):
             x_k = conv(x_k, g.edge_index)
             x_profile[:, k*self.num_features : (k+1)*self.num_features] = x_k

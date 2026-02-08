@@ -307,11 +307,12 @@ class GINIDConvLayer(MessagePassing):
 
 class IDGNN(nn.Module):
     """Base Identity-aware GNN adapted for MIND-ND framework"""
-    def __init__(self, num_features, num_heads, num_mps):
+    def __init__(self, num_features, num_heads, num_mps, positional_encoding=None):
         super().__init__()
         self.num_features = num_features  # F
         self.num_mps = num_mps  # K layers
         self.num_heads = num_heads
+        self.positional_encoding = positional_encoding
         
         # Initialize node features
         self.register_buffer("x_init", torch.ones(1, num_features))
@@ -329,7 +330,11 @@ class IDGNN(nn.Module):
                                device=self.x_init.device)
         
         # Initialize node features (N+B, F)
-        x_k = self.x_init.expand(g.total_nodes, -1)
+        if self.positional_encoding == 'RW':
+            from utils.graph_data import random_walk_positional_encoding
+            x_k = random_walk_positional_encoding(g, self.num_features, self.x_init.device)
+        else:
+            x_k = self.x_init.expand(g.total_nodes, -1)
         
         # Apply conv layers
         for k, conv in enumerate(self.convs):
@@ -350,24 +355,24 @@ class IDGNN(nn.Module):
 
 class IDGCN(IDGNN):
     """Identity-aware GCN variant"""
-    def __init__(self, num_features, num_heads, num_mps):
-        super().__init__(num_features, num_heads, num_mps)
+    def __init__(self, num_features, num_heads, num_mps, positional_encoding=None):
+        super().__init__(num_features, num_heads, num_mps, positional_encoding)
         for _ in range(num_mps):
             self.convs.append(GCNIDConvLayer(num_features, num_features))
 
 
 class IDSAGE(IDGNN):
     """Identity-aware GraphSAGE variant"""
-    def __init__(self, num_features, num_heads, num_mps):
-        super().__init__(num_features, num_heads, num_mps)
+    def __init__(self, num_features, num_heads, num_mps, positional_encoding=None):
+        super().__init__(num_features, num_heads, num_mps, positional_encoding)
         for _ in range(num_mps):
             self.convs.append(SAGEIDConvLayer(num_features, num_features, concat=True))
 
 
 class IDGAT(IDGNN):
     """Identity-aware GAT variant"""
-    def __init__(self, num_features, num_heads, num_mps):
-        super().__init__(num_features, num_heads, num_mps)
+    def __init__(self, num_features, num_heads, num_mps, positional_encoding=None):
+        super().__init__(num_features, num_heads, num_mps, positional_encoding)
         for _ in range(num_mps):
             self.convs.append(GATIDConvLayer(num_features, num_features // num_heads, 
                                            heads=num_heads, concat=True))
@@ -375,8 +380,8 @@ class IDGAT(IDGNN):
 
 class IDGIN(IDGNN):
     """Identity-aware GIN variant"""
-    def __init__(self, num_features, num_heads, num_mps):
-        super().__init__(num_features, num_heads, num_mps)
+    def __init__(self, num_features, num_heads, num_mps, positional_encoding=None):
+        super().__init__(num_features, num_heads, num_mps, positional_encoding)
         for _ in range(num_mps):
             gin_nn = nn.Sequential(
                 nn.Linear(num_features, num_features), 

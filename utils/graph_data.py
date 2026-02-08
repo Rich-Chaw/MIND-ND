@@ -48,3 +48,61 @@ class Batch:
         self.edge_index = torch.tensor(edge_index, dtype=torch.long, device=self.device)
         self.batch = torch.tensor(batch, dtype=torch.long, device=self.device) #(N+B)
         self.batch_non_omni = self.batch[self.non_omni_mask] #(N)
+
+
+def random_walk_positional_encoding(batch, num_features, device):
+    """
+    Compute Random Walk Positional Encodings for a batch of graphs.
+    For each node i, the feature is the probability that a random walk starting at i
+    returns to i after k steps, for k=1, 2, ..., num_features.
+
+    Returns:
+        Tensor of shape (total_nodes, num_features) on the given device.
+        Omni-nodes get zero encoding.
+    """
+    B = batch.batch_size
+    num_nodes_b = batch.num_nodes_b  # (B,) includes omni
+    omni_ids = batch.omni_ids  # (B,)
+    edge_index = batch.edge_index  # (2, E)
+    # start_ids[b] = index of first node of graph b
+    start_ids = torch.zeros(B, dtype=torch.long, device=device)
+    if B > 1:
+        start_ids[1:] = torch.cumsum(num_nodes_b[:-1], dim=0)
+
+    out_list = []
+    for b in range(B):
+        start_id = start_ids[b].item()
+        n_b = (num_nodes_b[b] - 1).item()  # non-omni nodes
+        omni_id_b = omni_ids[b].item()
+        if n_b == 0:
+            # graph has 0 original nodes, only omni
+            pe = torch.zeros(1, num_features, device=device)
+            out_list.append(pe)
+            continue
+        # Edges entirely within non-omni nodes (exclude omni)
+        mask = (
+            (edge_index[0] >= start_id) & (edge_index[0] < start_id + n_b) &
+            (edge_index[1] >= start_id) & (edge_index[1] < start_id + n_b)
+        )
+        local_ei = edge_index[:, mask] - start_id  # (2, E_b)
+        if local_ei.shape[1] == 0:
+            # no edges: P^k = 0 for k>=1, use zeros
+            pe = torch.zeros(n_b + 1, num_features, device=device)
+            out_list.append(pe)
+            continue
+        # Build adjacency A (n_b x n_b)
+        A = torch.zeros(n_b, n_b, device=device)
+        A[local_ei[0], local_ei[1]] = 1.0
+        deg = A.sum(dim=1, keepdim=True).clamp(min=1e-8)
+        P = A / deg  # transition matrix
+        # Diagonals of P^1, P^2, ..., P^num_features
+        diags = [torch.diag(P)]
+        p_power = P.clone()
+        for _ in range(2, num_features + 1):
+            p_power = p_power @ P
+            diags.append(torch.diag(p_power))
+        pe_non_omni = torch.stack(diags, dim=1)  # (n_b, num_features)
+        omni_row = torch.zeros(1, num_features, device=device)
+        pe = torch.cat([pe_non_omni, omni_row], dim=0)  # (n_b+1, num_features)
+        out_list.append(pe)
+    return torch.cat(out_list, dim=0)

@@ -46,13 +46,14 @@ class GraphConvolution(nn.Module):
 
 
 class GCNII(nn.Module):
-    def __init__(self, num_features, nlayers, dropout=0.6, lamda=0.5, alpha=0.1, variant=False):
+    def __init__(self, num_features, nlayers, dropout=0.6, lamda=0.5, alpha=0.1, variant=False, positional_encoding=None):
         super().__init__()
         self.num_features = num_features
         self.nlayers = nlayers # K
         self.dropout = dropout
         self.alpha = alpha
         self.lamda = lamda
+        self.positional_encoding = positional_encoding
         
         # Initialize with ones like MIND
         self.register_buffer("x_init", torch.ones(1, num_features))
@@ -81,7 +82,11 @@ class GCNII(nn.Module):
         ).coalesce()
 
         # Initialize and transform input features
-        x = self.x_init.expand(g.total_nodes, -1)
+        if self.positional_encoding == 'RW':
+            from utils.graph_data import random_walk_positional_encoding
+            x = random_walk_positional_encoding(g, self.num_features, self.x_init.device)
+        else:
+            x = self.x_init.expand(g.total_nodes, -1)
         x = F.dropout(x, self.dropout, training=self.training)
         layer_inner = self.act_fn(self.fc_in(x))
         h0 = layer_inner  # Keep reference to initial layer

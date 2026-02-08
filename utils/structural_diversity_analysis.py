@@ -38,7 +38,7 @@ def calculate_properties(graphs):
     """Calculate modularity and assortativity for all graphs"""
     q_values, r_values, labels = [], [], []
     
-    for i, (graph, topology) in enumerate(graphs):
+    for i, graph in enumerate(graphs):
         if i % 1000 == 0:
             print(f"Processing {i+1}/{len(graphs)}")
             
@@ -55,7 +55,7 @@ def calculate_properties(graphs):
             
             q_values.append(q)
             r_values.append(r)
-            labels.append(topology)
+            labels.append(graph['config']['topology'])
             
         except:
             continue

@@ -5,11 +5,19 @@ import torch.nn.functional as F
 from torch_geometric.nn import GCNConv, SAGEConv, GATConv, GraphNorm
 
 # classical GNNS
+def _get_initial_node_features(g, num_features, x_init, positional_encoding):
+    from utils.graph_data import random_walk_positional_encoding
+    if positional_encoding == 'RW':
+        return random_walk_positional_encoding(g, num_features, x_init.device)
+    return x_init.expand(g.total_nodes, -1)
+
+
 class GCN(nn.Module):
-    def __init__(self, num_features, num_heads, num_mps):
+    def __init__(self, num_features, num_heads, num_mps, positional_encoding=None):
         super().__init__()
         self.num_features = num_features
         self.num_mps = num_mps
+        self.positional_encoding = positional_encoding
         # Initialize with all-ones features like MIND/HGNN
         self.register_buffer("x_init", torch.ones(1, num_features))
         
@@ -22,7 +30,7 @@ class GCN(nn.Module):
 
     def forward(self, g):
         x_profile = torch.empty(g.total_nodes, self.num_features * self.num_mps, device=self.x_init.device)
-        x = self.x_init.expand(g.total_nodes, -1)
+        x = _get_initial_node_features(g, self.num_features, self.x_init, self.positional_encoding)
         
         for k, conv in enumerate(self.convs):
             x = conv(x, g.edge_index)
@@ -39,10 +47,11 @@ class GCN(nn.Module):
         return x_profile
 
 class GraphSAGE(nn.Module):
-    def __init__(self, num_features, num_heads, num_mps):
+    def __init__(self, num_features, num_heads, num_mps, positional_encoding=None):
         super().__init__()
         self.num_features = num_features
         self.num_mps = num_mps
+        self.positional_encoding = positional_encoding
         self.register_buffer("x_init", torch.ones(1, num_features))
         
         self.convs = nn.ModuleList()
@@ -53,7 +62,7 @@ class GraphSAGE(nn.Module):
 
     def forward(self, g):
         x_profile = torch.empty(g.total_nodes, self.num_features * self.num_mps, device=self.x_init.device)
-        x = self.x_init.expand(g.total_nodes, -1)
+        x = _get_initial_node_features(g, self.num_features, self.x_init, self.positional_encoding)
         
         for k, conv in enumerate(self.convs):
             x = conv(x, g.edge_index)
@@ -68,10 +77,11 @@ class GraphSAGE(nn.Module):
         return x_profile
 
 class GAT(nn.Module):
-    def __init__(self, num_features, num_heads, num_mps):
+    def __init__(self, num_features, num_heads, num_mps, positional_encoding=None):
         super().__init__()
         self.num_features = num_features
         self.num_mps = num_mps
+        self.positional_encoding = positional_encoding
         self.register_buffer("x_init", torch.ones(1, num_features))
         
         assert num_features % num_heads == 0, f'num_features {num_features} not divisible by num_heads {num_heads}'
@@ -85,7 +95,7 @@ class GAT(nn.Module):
 
     def forward(self, g):
         x_profile = torch.empty(g.total_nodes, self.num_features * self.num_mps, device=self.x_init.device)
-        x = self.x_init.expand(g.total_nodes, -1)
+        x = _get_initial_node_features(g, self.num_features, self.x_init, self.positional_encoding)
         
         for k, conv in enumerate(self.convs):
             x = conv(x, g.edge_index)

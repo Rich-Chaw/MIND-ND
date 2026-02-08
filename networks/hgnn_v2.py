@@ -53,10 +53,11 @@ class OptimizedHybridLayer(MessagePassing):
 
 
 class HGNN_V2(nn.Module):
-    def __init__(self, num_features, num_heads, num_mps, alpha=0.1, theta=0.5):
+    def __init__(self, num_features, num_heads, num_mps, alpha=0.1, theta=0.5, positional_encoding=None):
         super().__init__()
         self.num_features = num_features  # F
         self.num_mps = num_mps  # K layers
+        self.positional_encoding = positional_encoding
         
         # Initialize with all-ones features like MIND
         self.register_buffer("x_init", torch.ones(1, num_features))
@@ -75,7 +76,11 @@ class HGNN_V2(nn.Module):
         return x_profile (N, 2KF) - concatenation of node and graph embeddings
         '''
         # Initialize features for all nodes (N+B, F)
-        x = self.x_init.expand(g.total_nodes, -1)
+        if self.positional_encoding == 'RW':
+            from utils.graph_data import random_walk_positional_encoding
+            x = random_walk_positional_encoding(g, self.num_features, self.x_init.device)
+        else:
+            x = self.x_init.expand(g.total_nodes, -1)
         x_0 = x.clone()  # Keep initial features for residual connections
         
         # Store layer outputs for profile construction

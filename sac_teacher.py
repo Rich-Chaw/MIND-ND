@@ -97,6 +97,8 @@ class Args:
     """number of message passings"""
     normalize: bool=True
     """apply instance normalization"""
+    positional_encoding: Optional[str]=None
+    """node initial features: None = all ones, 'RW' = random walk return-probability encoding"""
 
     # dataset directories
     train_dir: str = 'graphs/train/100_150_SBM_DCSBM_LPA_COPY_ER_6000'
@@ -163,7 +165,7 @@ if __name__ == "__main__":
     buffer = PriorReplayBuffer(args.buffer_size, device)
 
     # Load pretrained network 
-    policy, qf1, qf2, qf1_target, qf2_target = load_sac_dismantler(args.num_features, args.num_heads, args.num_mps, args.gnn, device, args.ckpt_pth)
+    policy, qf1, qf2, qf1_target, qf2_target = load_sac_dismantler(args.num_features, args.num_heads, args.num_mps, args.gnn, device, args.ckpt_pth, args.positional_encoding)
     print(f"Loaded checkpoint: {args.ckpt_pth}")
     print(f"Teacher method: {args.teacher_method}")
     print(f"Priority sampling: {args.priority_type}")

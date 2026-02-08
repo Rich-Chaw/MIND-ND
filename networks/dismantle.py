@@ -8,12 +8,12 @@ from .gnn import GNN_ENCODER
 from .hypernetwork import Hypernetwork, FiLMGenerator
 
 
-def load_sac_dismantler(F, H, K, gnn, device, ckpt_pth=None):
-    policy = SACPolicy(F, H, K, gnn).to(device)
-    qf1 = SACQNetwork(F, H, K, gnn).to(device)
-    qf2 = SACQNetwork(F, H, K, gnn).to(device)
-    qf1_target = SACQNetwork(F, H, K, gnn).to(device)
-    qf2_target = SACQNetwork(F, H, K, gnn).to(device)
+def load_sac_dismantler(F, H, K, gnn, device, ckpt_pth=None, positional_encoding=None):
+    policy = SACPolicy(F, H, K, gnn, positional_encoding).to(device)
+    qf1 = SACQNetwork(F, H, K, gnn, positional_encoding).to(device)
+    qf2 = SACQNetwork(F, H, K, gnn, positional_encoding).to(device)
+    qf1_target = SACQNetwork(F, H, K, gnn, positional_encoding).to(device)
+    qf2_target = SACQNetwork(F, H, K, gnn, positional_encoding).to(device)
     if ckpt_pth != None:
         ckpt = torch.load(ckpt_pth)
         policy.load_state_dict(ckpt['policy_state_dict'])
@@ -30,9 +30,9 @@ def load_sac_dismantler(F, H, K, gnn, device, ckpt_pth=None):
 
 
 class SACPolicy(nn.Module):
-    def __init__(self, num_features, num_heads, num_mps, gnn):
+    def __init__(self, num_features, num_heads, num_mps, gnn, positional_encoding=None):
         super().__init__()
-        self.graph_embedding = GNN_ENCODER[gnn](num_features, num_heads, num_mps)
+        self.graph_embedding = GNN_ENCODER[gnn](num_features, num_heads, num_mps, positional_encoding=positional_encoding)
         e_size = (num_features*num_mps)*2
 
         self.mlp = nn.Sequential(
@@ -69,9 +69,9 @@ class SACPolicy(nn.Module):
 
 
 class SACQNetwork(nn.Module):
-    def __init__(self, num_features, num_heads, num_mps, gnn):
+    def __init__(self, num_features, num_heads, num_mps, gnn, positional_encoding=None):
         super().__init__()
-        self.graph_embedding = GNN_ENCODER[gnn](num_features, num_heads, num_mps)
+        self.graph_embedding = GNN_ENCODER[gnn](num_features, num_heads, num_mps, positional_encoding=positional_encoding)
         e_size = (num_features*num_mps)*2
 
         self.mlp = nn.Sequential(

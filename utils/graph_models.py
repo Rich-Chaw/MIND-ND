@@ -2,6 +2,7 @@ import igraph as ig
 import numpy as np
 import matplotlib.pyplot as plt
 import pickle
+import random
 from scipy.spatial.distance import pdist, squareform
 
 def ER(N,p):
@@ -348,6 +349,36 @@ def DCSBM(N, p_in, p_out, num_blocks, unbalanced=False):
     g.vs["community"] = membership
 
     return g
+
+def LFR(N, m, tau1, tau2, mu, min_comm=10, max_deg=None, seed=None, store_community=False, max_retries=10):
+    import networkx as nx
+    params = {
+        "n": N,
+        "tau1": tau1,
+        "tau2": tau2,
+        "mu": mu,
+        "average_degree": m,
+        "min_community": min_comm,
+        "max_degree": max_deg,
+        "max_iters": 500,
+        "seed": seed,
+    }
+    try:
+        g_nx = nx.LFR_benchmark_graph(**params)
+        g_nx.remove_edges_from(nx.selfloop_edges(g_nx))
+        edgelist = list(g_nx.edges())
+        print(
+            f"Succeeded to generate LFR for n={N}, average_degree={m}, mu={mu:.2f}, "
+            f"tau1={tau1:.2f}, tau2={tau2:.2f}"
+        )
+        return ig.Graph(n=N, edges=edgelist, directed=False), 0
+    
+    except (Exception, nx.NetworkXError, nx.ExceededMaxIterations) as e:
+        print(
+            f"Failed to generate LFR for n={N}, average_degree={m}, mu={mu:.2f}, "
+            f"tau1={tau1:.2f}, tau2={tau2:.2f}"
+        )
+        return None, None
 
 def corrupting(g):
     """
