@@ -17,9 +17,8 @@ def generate(topology,nrange = "100_200",num=10,is_rewiring=False):
     while idx < num:
         N = np.random.randint(n_min,n_max+1)
         if topology in ['Ring','BA','Copy','LPA','ER']:
-            # m = int(np.random.choice([1, 2, 3, 4, 5, 6, 8, 10],
-            #                         p=[1/12, 2/12, 2/12, 2/12, 2/12, 1/12, 1/12, 1/12]))
-            m = int(np.random.choice([1, 2, 3, 4, 5, 6, 8],p=[1/12, 2/12, 2/12, 2/12, 2/12, 2/12, 1/12]))
+            m = int(np.random.choice([1, 2, 3, 4, 5, 6, 8, 10],
+                                    p=[1/12, 2/12, 2/12, 2/12, 2/12, 1/12, 1/12, 1/12]))
         if topology in ['SBM','DCSBM','Barbell','StarCom','RingCom']:
             m = int(np.random.choice([3, 4, 5, 6, 8, 10, 12],
                                     p=[3/12, 3/12, 2/12, 2/12, 1/12, 1/24, 1/24]))
@@ -67,14 +66,14 @@ def generate(topology,nrange = "100_200",num=10,is_rewiring=False):
         elif topology == 'LFR':
             tau1 = 2.5 + np.random.rand()
             tau2 = np.random.uniform(1.0,2.0)
-            mu = np.random.uniform(0.05,0.6)
+            mu = np.random.uniform(0.05,0.3)
             m = np.random.randint(3,12)
             min_comm = 10
-            max_deg = int(N * 0.1)
-            g, attempts = LFR(N,m,tau1,tau2,mu,min_comm,max_deg)
+            max_deg = int(N * 0.12)
+            g = LFR(N,m,tau1,tau2,mu,min_comm,max_deg)
             if g is None:
                 continue
-            config = {'N':N,'m':m,'tau1':float(tau1),'tau2':float(tau2),'mu':float(mu),'min_comm':min_comm,'max_deg':max_deg,'attempts':attempts}
+            config = {'N':N,'m':m,'tau1':float(tau1),'tau2':float(tau2),'mu':float(mu),'min_comm':min_comm,'max_deg':max_deg}
         elif topology == 'RGG':
             r = np.sqrt(np.log(N) / (np.pi * N))
             r = np.random.uniform(1.1,2.0) * r
@@ -138,13 +137,15 @@ if __name__ == "__main__":
     parser.add_argument("--save_dir", type=str, default="graphs/", help="The directory to save the graphs")
     parser.add_argument("--mode", type=str, default="train", help="The mode to run the script")
     parser.add_argument("--nrange", type=str, default="100_200", help="The range of the number of nodes")
-    parser.add_argument("--num", type=int, default=3, help="The number of graphs to generate")
+    parser.add_argument("--num", type=int, default=5000, help="The number of graphs to generate")
     parser.add_argument("--with_label", type=bool, default=False, help="Whether to save the label")
     parser.add_argument("--is_rewiring", type=bool, default=False, help="Whether to rewire the graphs")
     args = parser.parse_args()
     
 
-    topologies = ['LFR']
+    # topologies = ['LFR']
+    topologies = ['LPA','Copy','ER']
+    # ['SBM','DCSBM','LPA','Copy','ER']
 
     dataset_name = f"{args.nrange}"
     for topology in topologies:
@@ -158,39 +159,48 @@ if __name__ == "__main__":
     print(f"Saving graphs to {save_dir}")
 
     graphs = []
-    for idx in range(args.num):
+    for file in os.listdir(save_dir):
+        if file.endswith('.pkl'):
+            with open(os.path.join(save_dir,file),'rb') as f:
+                graphs.append(pickle.load(f))
+    print(f"Found {len(graphs)} existing graphs")
+
+    for g_idx in range(len(graphs),args.num):
         # topology = np.random.choice(['Barbell','StarCom','RingCom','SBM'])
         # topology = np.random.choice(['SBM','DCSBM','LPA','Copy','ER'])
         topology = np.random.choice(topologies)
-        graphs.extend(generate(topology,args.nrange,1,is_rewiring=args.is_rewiring))
 
-    print(f"generated {len(graphs)} graphs")
-    
-    net_dict = {}
-    for net_no, g in enumerate(graphs):
-        # Config is also stored on the graph as g["config"]
-        config = g['config']
-        topology = config.get('topology')
-        net_dict[net_no] = {'adj': np.array(g.get_adjacency().data, dtype=bool)}
-        net_dict[net_no]['info'] = {
-            'topology': topology,
-            'size': g.vcount(),
-            'mean_deg': np.mean(g.degree()),
-            'assortativity': g.assortativity_degree(),
-            'config': config,
-        }
-        
+        g = generate(topology,args.nrange,1,is_rewiring=args.is_rewiring)[0]
         if args.with_label:
-            save_name = f"{net_no:05d}_{topology}.pkl"
+            save_name = f"{g_idx:05d}_{topology}.pkl"
         else:
-            save_name = f"{net_no:05d}.pkl"
-        
+            save_name = f"{g_idx:05d}.pkl"
         with open(os.path.join(save_dir,save_name),'wb') as f:
             pickle.dump(g,f)
 
+        graphs.append(g)
+
+    print(f"generated {len(graphs)} graphs")
+    
+    # net_dict = {}
+    # for net_no, g in enumerate(graphs):
+    #     # Config is also stored on the graph as g["config"]
+    #     config = g['config']
+    #     topology = config.get('topology')
+    #     net_dict[net_no] = {'adj': np.array(g.get_adjacency().data, dtype=bool)}
+    #     net_dict[net_no]['info'] = {
+    #         'topology': topology,
+    #         'size': g.vcount(),
+    #         'mean_deg': np.mean(g.degree()),
+    #         'assortativity': g.assortativity_degree(),
+    #         'config': config,
+    #     }
+        
+
     from utils.structural_diversity_analysis import calculate_properties,create_scatter_plot
     q_values, r_values, labels = calculate_properties(graphs)
-    create_scatter_plot(q_values, r_values, labels)
+    print(len(q_values))
+    create_scatter_plot(q_values, r_values, labels, os.path.join(save_dir,f"diversity_scatter.png"))
     
     # with open(f'{dataset_name}.pkl', 'wb') as out_f:
     #     pickle.dump(net_dict, out_f)

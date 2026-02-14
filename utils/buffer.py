@@ -67,33 +67,13 @@ class PriorReplayBuffer():
         self.obs_next_buffer = np.empty(buffer_size, dtype=object)
         self.rew_buffer = np.empty(buffer_size, dtype=np.float32)
         self.done_buffer = np.empty(buffer_size, dtype=bool)
-        self.lcc_ratio_buffer = np.empty(buffer_size, dtype=np.float32)
-        self.td_error_buffer = np.empty(buffer_size, dtype=np.float32)
         self.from_teacher_buffer = np.empty(buffer_size, dtype=bool)
+        self.td_error_buffer = np.empty(buffer_size, dtype=np.float32)
         self.policy_grad_norm_buffer = np.empty(buffer_size, dtype=np.float32)
-        
-    def _compute_lcc_ratio(self, obs_list):
-        """Compute LCC size ratio (current/original) for each observation"""
-        lcc_ratios = []
-        for obs in obs_list:
-            try:
-                n_init = obs['n_init']
-                if obs.vcount() == 0:
-                    current_lcc_size = 0
-                else:
-                    components = obs.connected_components()
-                    current_lcc_size = max(components.sizes()) if len(components.sizes()) > 0 else 0
-                ratio = current_lcc_size / max(n_init, 1)
-                lcc_ratios.append(ratio)
-            except Exception as e:
-                print(f"error {e} in buffer lcc!")
-                lcc_ratios.append(0.5)
-        return np.array(lcc_ratios, dtype=np.float32)
     
     def add(self, obs_list, act_arr, obs_next_list, rew_arr, done_arr, td_errors=None, from_teacher=False, policy_grad_norms=None, fixed=False):
         """Add experiences to buffer with permanent teacher storage"""
         num_t = len(obs_list)
-        lcc_ratios = self._compute_lcc_ratio(obs_list)
         
         if fixed:
             # Store teacher experiences permanently starting from fix_ptr
@@ -127,7 +107,6 @@ class PriorReplayBuffer():
         self.obs_next_buffer[idx] = np.array([ig_to_data(g) for g in obs_next_list])
         self.rew_buffer[idx] = rew_arr
         self.done_buffer[idx] = done_arr
-        self.lcc_ratio_buffer[idx] = lcc_ratios
         self.from_teacher_buffer[idx] = from_teacher
 
         # Store TD-errors
@@ -144,7 +123,7 @@ class PriorReplayBuffer():
     
     def sample(self, batch_size, priority=None, return_indices=False, return_tags=False):
         """
-        Sample experiences with optional priority-based sampling and importance sampling weights
+        Sample experiences with optional priority-based sampling
         """
         if self.full:
             available_size = self.buffer_size
@@ -156,15 +135,9 @@ class PriorReplayBuffer():
         if available_size == 0:
             return None
         
-        weights = None  # Initialize weights
-        
         if available_size > 0:
             # Compute priorities
-            if priority == "LCC":
-                lcc_ratios = self.lcc_ratio_buffer[batch_inds]
-                priorities = np.ones(available_size)  # Base priority
-                priorities += lcc_ratios  # LCC bonus (higher LCC = higher priority)
-            elif priority == "TDE":
+            if priority == "TDE":
                 # TD-error based priority (absolute difference)
                 td_errors = np.abs(self.td_error_buffer[batch_inds])
                 priorities = td_errors + self.epsilon  # Small epsilon to avoid zero priorities
@@ -188,22 +161,13 @@ class PriorReplayBuffer():
             selected_indices = np.random.choice(batch_inds, size=min(batch_size, available_size), 
                                               p=probs, replace=True)
             
-            # Calculate importance sampling weights: w_i = (1/N * 1/P(i))^β
-            if priority is not None:
-                selected_priorities = priorities[np.searchsorted(batch_inds, selected_indices)]
-                weights = ((1.0 / available_size) * (1.0 / selected_priorities)) ** self.beta
-                weights = weights / weights.max()                       # Normalize weights by max weight for stability
-                weights = torch.tensor(weights, device=self.device, dtype=torch.float32)
-            else:
-                weights = torch.ones(len(selected_indices), device=self.device, dtype=torch.float32)
-
         obs = Batch(self.device, self.obs_buffer[selected_indices].tolist())
         obs_next = Batch(self.device, self.obs_next_buffer[selected_indices].tolist())
         act = torch.tensor(self.act_buffer[selected_indices], device=self.device, dtype=torch.long)
         rew = torch.tensor(self.rew_buffer[selected_indices], device=self.device, dtype=torch.float32)
         done = torch.tensor(self.done_buffer[selected_indices], device=self.device, dtype=torch.float32)
         
-        samples = [obs, act, obs_next, rew, done, weights]
+        samples = [obs, act, obs_next, rew, done]
         
         if return_indices:
             samples.append(selected_indices)
@@ -217,11 +181,61 @@ class PriorReplayBuffer():
         """Update TD-errors for specific buffer indices"""
         if len(indices) == len(td_errors):
             self.td_error_buffer[indices] = td_errors
-    
-    def update_policy_grad_norms(self, indices, policy_grad_norms):
-        """Update policy gradient norms for specific buffer indices"""
-        if len(indices) == len(policy_grad_norms):
-            self.policy_grad_norm_buffer[indices] = policy_grad_norms
+
+    def get_state_dict(self):
+        """Return a dict of buffer state_dict for saving (e.g. inside a checkpoint)."""
+        return {
+            "buffer_size": self.buffer_size,
+            "ptr": self.ptr,
+            "fix_ptr": self.fix_ptr,
+            "full": self.full,
+            "obs_buffer": self.obs_buffer,
+            "act_buffer": self.act_buffer,
+            "obs_next_buffer": self.obs_next_buffer,
+            "rew_buffer": self.rew_buffer,
+            "done_buffer": self.done_buffer,
+            "from_teacher_buffer": self.from_teacher_buffer,
+            "td_error_buffer": self.td_error_buffer,
+            "policy_grad_norm_buffer": self.policy_grad_norm_buffer,
+        }
+
+    def load_state_dict(self, state_dict):
+        """
+        Restore buffer from a state dict (from get_state() or from a checkpoint).
+        If saved buffer is smaller than self.buffer_size, only the used slice is copied.
+        """
+        self.ptr = int(state_dict["ptr"])
+        self.fix_ptr = int(state_dict["fix_ptr"])
+        self.full = bool(state_dict["full"])
+        saved_size = int(state_dict.get("buffer_size", len(state_dict["act_buffer"])))
+        n = min(saved_size, self.buffer_size, self.ptr if not self.full else self.buffer_size)
+        if n <= 0:
+            return
+        idx = np.arange(n)
+        self.obs_buffer[idx] = state_dict["obs_buffer"][idx]
+        self.act_buffer[idx] = state_dict["act_buffer"][idx]
+        self.obs_next_buffer[idx] = state_dict["obs_next_buffer"][idx]
+        self.rew_buffer[idx] = state_dict["rew_buffer"][idx]
+        self.done_buffer[idx] = state_dict["done_buffer"][idx]
+        self.from_teacher_buffer[idx] = state_dict["from_teacher_buffer"][idx]
+        self.td_error_buffer[idx] = state_dict["td_error_buffer"][idx]
+        self.policy_grad_norm_buffer[idx] = state_dict["policy_grad_norm_buffer"][idx]
+
+    def save(self, path):
+        """Save buffer state_dict to a file (torch.save)."""
+        torch.save(self.get_state(), path)
+
+    def load(self, path):
+        """
+        Load buffer state_dict from a file (torch.save) or from a path.
+        Can also be used with a state_dict dict: buffer.load_state(torch.load(path)).
+        """
+        state_dict = torch.load(path, map_location="cpu")
+        if isinstance(state_dict, dict) and "act_buffer" in state_dict:
+            self.load_state(state_dict)
+        else:
+            raise ValueError(f"Invalid buffer checkpoint at {path}: expected state_dict dict with 'act_buffer'.")
+
 
 class RolloutBuffer:
     """

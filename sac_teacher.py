@@ -5,9 +5,9 @@ import torch
 import random
 import numpy as np
 import igraph as ig
-from typing import Optional
+from typing import Optional, List
+from dataclasses import dataclass, field
 from collections import deque
-from dataclasses import dataclass
 from torch_scatter import scatter_add
 from datetime import datetime, timedelta
 from torch.nn.functional import mse_loss
@@ -72,9 +72,20 @@ class Args:
     """Priority type for sampling: 'LCC', 'TDE', 'R', 'TEACHER', 'DDPGfD'"""
     
     # demeonstration setting
-    demonstrate: bool = False
+    demo: bool = False
     """Save demonstation in teacher buffer before training"""
+    demo_dir: List[str] = field(default_factory=lambda: [
+        'graphs/demo/100_150_SBM_DCSBM_LPA_COPY_ER_6000'
+    ])
     num_demos: int = 3000
+    """Number of demonstrations to save"""
+    demo_ckpt: Optional[str] = None
+    bc: bool = False
+    """Use behavior cloning to train the policy (supervised on teacher demos)"""
+    bc_ckpt: Optional[str] = None
+    """Optional checkpoint to load a behavior-cloned policy"""
+    bc_steps: int = 10000
+    """Number of gradient steps for behavior cloning when training from buffer"""
 
     # Reward shaping settings
     reward_shaping: bool = False
@@ -101,8 +112,12 @@ class Args:
     """node initial features: None = all ones, 'RW' = random walk return-probability encoding"""
 
     # dataset directories
-    train_dir: str = 'graphs/train/100_150_SBM_DCSBM_LPA_COPY_ER_6000'
-    valid_dir: str = 'graphs/valid/100_150_SBM_DCSBM_LPA_COPY_ER_60'
+    train_dir: List[str] = field(default_factory=lambda: [
+        'graphs/train/100_150_SBM_DCSBM_LPA_COPY_ER_6000'
+    ])
+    valid_dir: List[str] = field(default_factory=lambda: [
+        'graphs/valid/100_150_SBM_DCSBM_LPA_COPY_ER_60'
+    ])
 
 
 from finetune_utils import teacher_wrapper, teacher_step, compute_reward_shaping
@@ -161,7 +176,18 @@ if __name__ == "__main__":
         is_val=True, 
         seed=args.seed
     )
-    
+
+    if args.demo_dir:
+        env_demo = DismantleEnv(
+            data_dir=args.demo_dir, 
+            batch_size=args.num_envs, 
+            is_val=False, 
+            seed=args.seed,
+            remove_scc=False
+        )
+    else:
+        env_demo = env
+        
     buffer = PriorReplayBuffer(args.buffer_size, device)
 
     # Load pretrained network 
@@ -170,31 +196,88 @@ if __name__ == "__main__":
     print(f"Teacher method: {args.teacher_method}")
     print(f"Priority sampling: {args.priority_type}")
      
-    if args.demonstrate:
-        obs_list, _ = env.reset()
-        num_eps = 0
-        while num_eps < args.num_demos:
-            act_arr = []
-            for graph in obs_list:
-                removals = teacher_wrapper(graph, args.teacher_method, max_steps=1)
-                teacher_action = removals[0]
-                act_arr.append(teacher_action)
-            
-            obs_next_list, rew_arr, done_arr, info_list = env.step(np.array(act_arr))
+    if args.demo:
+        if args.demo_ckpt and os.path.isfile(args.demo_ckpt):
+            pass
+        else:
+            obs_list, _ = env_demo.reset()
+            num_eps = 0
+            while num_eps < args.num_demos:
+                act_arr = []
+                for graph in obs_list:
+                    removals = teacher_wrapper(graph, args.teacher_method, max_steps=1)
+                    teacher_action = removals[0]
+                    act_arr.append(teacher_action)
                 
-            # Add to teacher buffer
-            buffer.add(obs_list, act_arr, obs_next_list, rew_arr, done_arr, from_teacher=True,fixed=True)
-            num_eps += len(info_list)
+                obs_next_list, rew_arr, done_arr, info_list = env_demo.step(np.array(act_arr))
+                    
+                # Add to teacher buffer
+                buffer.add(obs_list, act_arr, obs_next_list, rew_arr, done_arr, from_teacher=True,fixed=True)
+                num_eps += len(info_list)
 
-            obs_next_list, _ = env.reset_async(done_arr)
-            obs_list = obs_next_list
+                obs_next_list, _ = env_demo.reset_async(done_arr)
+                obs_list = obs_next_list
 
         # Cleanup
         del act_arr, obs_next_list, rew_arr, done_arr
         
         # log buffer size
         print(f"Saved {buffer.ptr} transitions from demonstration in buffer")
+        
+        torch.save({
+                "buffer_state_dict": buffer.get_state_dict(),
+            }, args.bc_ckpt)
+            
 
+    if args.bc:
+        # Option 1: load an already behavior-cloned policy (and optionally the buffer)
+        if args.bc_ckpt and os.path.isfile(args.bc_ckpt):
+            ckpt = torch.load(args.bc_ckpt, map_location=device)
+            if "policy_state_dict" in ckpt:
+                policy.load_state_dict(ckpt["policy_state_dict"])
+                print(f"Loaded behavior cloning checkpoint: {args.bc_ckpt}")
+            if "buffer_state" in ckpt:
+                buffer.load_state(ckpt["buffer_state"])
+                print(f"Loaded buffer from checkpoint ({buffer.ptr} transitions).")
+        # Option 2: run supervised behavior cloning from teacher demonstrations in buffer
+        else:
+            print(f"Training behavior cloning for {args.bc_steps} steps using teacher demonstrations.")
+            bc_optimizer = torch.optim.Adam(
+                [p for p in policy.parameters() if p.requires_grad],
+                lr=args.learning_rate,
+                eps=1e-4,
+            )
+
+            for bc_step in range(args.bc_steps):
+                # Sample transitions
+                samples = buffer.sample(args.batch_size)
+                if samples is None:
+                    print("No demonstrations in buffer; stopping behavior cloning.")
+                    break
+
+                obs_b, act_b, obs_next_b, rew_b, done_b = samples
+
+                # Compute log-probabilities over actions from the policy
+                _, logp_nodes = policy.get_action(obs_b, val=True)
+
+                # Map per-graph action indices to node indices
+                act_nodes = act_b + obs_b.act_offsets
+                logp_selected = logp_nodes[act_nodes]
+
+                bc_loss = -logp_selected.mean()
+
+                bc_optimizer.zero_grad()
+                bc_loss.backward()
+                bc_optimizer.step()
+
+                if bc_step % 100 == 0:
+                    print(f"[BC] step {bc_step}/{args.bc_steps}, loss={bc_loss.item():.4f}")
+                    if args.use_tb:
+                        writer.add_scalar("bc/loss", bc_loss.item(), bc_step)
+
+            # Save policy and buffer to bc_ckpt after BC so you can load both later
+            torch.save({"policy_state_dict": policy.state_dict()}, args.bc_ckpt)
+            
     
     # Setup optimizers with appropriate learning rates
     lr = args.learning_rate
@@ -412,4 +495,4 @@ if __name__ == "__main__":
                 gc.collect()
                 gc.collect()  # Double collection for stubborn references
 # Example usage:
-# python sac_teacher.py --use_tb --device cuda:0 --teacher_method betweenness --demonstrate --reward_shaping
+# python sac_teacher.py --use_tb --device cuda:0 --teacher_method betweenness --demo --reward_shaping

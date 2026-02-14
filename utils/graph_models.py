@@ -350,8 +350,13 @@ def DCSBM(N, p_in, p_out, num_blocks, unbalanced=False):
 
     return g
 
+def handler(signum, frame):
+    raise Exception("LFR generation took too long - likely an internal loop!")
+
 def LFR(N, m, tau1, tau2, mu, min_comm=10, max_deg=None, seed=None, store_community=False, max_retries=10):
     import networkx as nx
+    import signal
+    
     params = {
         "n": N,
         "tau1": tau1,
@@ -363,6 +368,9 @@ def LFR(N, m, tau1, tau2, mu, min_comm=10, max_deg=None, seed=None, store_commun
         "max_iters": 500,
         "seed": seed,
     }
+
+    signal.signal(signal.SIGALRM, handler)
+    signal.alarm(5)
     try:
         g_nx = nx.LFR_benchmark_graph(**params)
         g_nx.remove_edges_from(nx.selfloop_edges(g_nx))
@@ -371,14 +379,16 @@ def LFR(N, m, tau1, tau2, mu, min_comm=10, max_deg=None, seed=None, store_commun
             f"Succeeded to generate LFR for n={N}, average_degree={m}, mu={mu:.2f}, "
             f"tau1={tau1:.2f}, tau2={tau2:.2f}"
         )
-        return ig.Graph(n=N, edges=edgelist, directed=False), 0
+        return ig.Graph(n=N, edges=edgelist, directed=False)
     
     except (Exception, nx.NetworkXError, nx.ExceededMaxIterations) as e:
         print(
             f"Failed to generate LFR for n={N}, average_degree={m}, mu={mu:.2f}, "
             f"tau1={tau1:.2f}, tau2={tau2:.2f}"
         )
-        return None, None
+        return None
+    finally:
+        signal.alarm(0) # Disable the alarm
 
 def corrupting(g):
     """

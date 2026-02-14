@@ -8,7 +8,7 @@ from utils import plot_process, load_g
 
 class DismantleEnv:
     def __init__(self,
-            data_dir: Optional[str] = None,
+            data_dir: Optional[Union[str, List[str]]] = None,
             graph_data: Optional[List[ig.Graph]] = None,
             batch_size: int=1,
             is_val: bool=False,
@@ -17,9 +17,18 @@ class DismantleEnv:
             render: Union[bool, str] = False
         ):
         if bool(data_dir) ^ bool(graph_data):
-            if data_dir:
-                graph_data = [load_g(os.path.join(data_dir, p), f'{os.path.basename(data_dir)}_{os.path.splitext(os.path.basename(p))[0]}') 
-                              for p in sorted(os.listdir(data_dir))]
+             if data_dir:
+                # Normalize to list
+                dirs = [data_dir] if isinstance(data_dir, str) else list(data_dir)
+
+                graph_data = []
+                for d in dirs:
+                    for p in sorted(os.listdir(d)):
+                        full_path = os.path.join(d, p)
+                        if not os.path.isfile(full_path):
+                            continue
+                        name = f'{os.path.basename(d)}_{os.path.splitext(os.path.basename(p))[0]}'
+                        graph_data.append(load_g(full_path, name))
         else:
             raise ValueError("Need either data_dir or g_list (but not both).")
 

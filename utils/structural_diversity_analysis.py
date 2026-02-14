@@ -57,7 +57,8 @@ def calculate_properties(graphs):
             r_values.append(r)
             labels.append(graph['config']['topology'])
             
-        except:
+        except Exception as e:
+            print(e)
             continue
     
     return np.array(q_values), np.array(r_values), np.array(labels)
@@ -90,6 +91,7 @@ def create_scatter_plot(q_values, r_values, labels, save_path=None):
     plt.tight_layout()
     if save_path:
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"Scatter plot saved to {save_path}")
     plt.show()
 
 def create_heatmap(q_values, r_values, labels, save_path = None):
