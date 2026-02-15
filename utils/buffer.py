@@ -182,6 +182,11 @@ class PriorReplayBuffer():
         if len(indices) == len(td_errors):
             self.td_error_buffer[indices] = td_errors
 
+    def update_policy_grad_norms(self, indices, policy_grad_norms):
+        """Update policy gradient norms for specific buffer indices"""
+        if len(indices) == len(policy_grad_norms):
+            self.policy_grad_norm_buffer[indices] = policy_grad_norms
+
     def get_state_dict(self):
         """Return a dict of buffer state_dict for saving (e.g. inside a checkpoint)."""
         return {

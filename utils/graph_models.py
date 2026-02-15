@@ -354,6 +354,9 @@ def handler(signum, frame):
     raise Exception("LFR generation took too long - likely an internal loop!")
 
 def LFR(N, m, tau1, tau2, mu, min_comm=10, max_deg=None, seed=None, store_community=False, max_retries=10):
+    '''
+    linux version
+    '''
     import networkx as nx
     import signal
     

@@ -61,9 +61,12 @@ class Args:
     ckpt_pth: Optional[str]=None
     """where ckeckpoint was saved"""
     
+    reward_type: Optional[int] = 0
+    """0: -LCC_t/N   1:(LCC_t-1 - LCC_t) / N """
+
     # Teacher method settings
     teacher_method: Optional[str] = None
-    """Teacher method: 'spectral', 'betweenness'"""
+    """Teacher method: 'spectral', 'betweenness', 'CI'"""
     teacher_distill: bool = False
     """Add teacher experience to buffer"""
     
@@ -75,15 +78,14 @@ class Args:
     demo: bool = False
     """Save demonstation in teacher buffer before training"""
     demo_dir: List[str] = field(default_factory=lambda: [
-        'graphs/demo/100_150_SBM_DCSBM_LPA_COPY_ER_6000'
+        'graphs/demo/100_200_LFR_3000',
+        'graphs/demo/100_200_LPA_Copy_ER_3000'
     ])
     num_demos: int = 3000
     """Number of demonstrations to save"""
     demo_ckpt: Optional[str] = None
     bc: bool = False
     """Use behavior cloning to train the policy (supervised on teacher demos)"""
-    bc_ckpt: Optional[str] = None
-    """Optional checkpoint to load a behavior-cloned policy"""
     bc_steps: int = 10000
     """Number of gradient steps for behavior cloning when training from buffer"""
 
@@ -125,7 +127,7 @@ from finetune_utils import teacher_wrapper, teacher_step, compute_reward_shaping
 def create_run_path_and_save_args(args):
     now = datetime.now()
     time_string = now.strftime("%Y%m%d_%H%M%S")
-    run_path = f"sac_teacher"
+    run_path = f"{args.gnn}/sac_teacher"
     if args.teacher_method:
         run_path += f"_{args.teacher_method}"
     if args.priority_type:
@@ -167,14 +169,16 @@ if __name__ == "__main__":
         batch_size=args.num_envs, 
         is_val=False, 
         seed=args.seed,
-        remove_scc=False
+        remove_scc=False,
+        reward_type=args.reward_type,
     )
     
     env_val = DismantleEnv(
         data_dir=args.valid_dir, 
         batch_size=args.num_envs, 
         is_val=True, 
-        seed=args.seed
+        seed=args.seed,
+        reward_type=args.reward_type,
     )
 
     if args.demo_dir:
@@ -183,7 +187,8 @@ if __name__ == "__main__":
             batch_size=args.num_envs, 
             is_val=False, 
             seed=args.seed,
-            remove_scc=False
+            remove_scc=False,
+            reward_type=args.reward_type,
         )
     else:
         env_demo = env
@@ -198,7 +203,14 @@ if __name__ == "__main__":
      
     if args.demo:
         if args.demo_ckpt and os.path.isfile(args.demo_ckpt):
-            pass
+            ckpt = torch.load(args.demo_ckpt, map_location=device)
+            if "policy_state_dict" in ckpt:
+                policy.load_state_dict(ckpt["policy_state_dict"])
+                print(f"Loaded behavior cloning checkpoint: {args.demo_ckpt}")
+            if "buffer_state_dict" in ckpt:
+                buffer.load_state(ckpt["buffer_state"])
+                print(f"Loaded {buffer.ptr} transitions from checkpoint in buffer.")
+        
         else:
             obs_list, _ = env_demo.reset()
             num_eps = 0
@@ -218,66 +230,53 @@ if __name__ == "__main__":
                 obs_next_list, _ = env_demo.reset_async(done_arr)
                 obs_list = obs_next_list
 
-        # Cleanup
-        del act_arr, obs_next_list, rew_arr, done_arr
+            # Cleanup
+            del act_arr, obs_next_list, rew_arr, done_arr
         
-        # log buffer size
-        print(f"Saved {buffer.ptr} transitions from demonstration in buffer")
-        
-        torch.save({
-                "buffer_state_dict": buffer.get_state_dict(),
-            }, args.bc_ckpt)
-            
+            # log buffer size
+            print(f"Saved {buffer.ptr} transitions from demonstration in buffer")
 
-    if args.bc:
-        # Option 1: load an already behavior-cloned policy (and optionally the buffer)
-        if args.bc_ckpt and os.path.isfile(args.bc_ckpt):
-            ckpt = torch.load(args.bc_ckpt, map_location=device)
-            if "policy_state_dict" in ckpt:
-                policy.load_state_dict(ckpt["policy_state_dict"])
-                print(f"Loaded behavior cloning checkpoint: {args.bc_ckpt}")
-            if "buffer_state" in ckpt:
-                buffer.load_state(ckpt["buffer_state"])
-                print(f"Loaded buffer from checkpoint ({buffer.ptr} transitions).")
-        # Option 2: run supervised behavior cloning from teacher demonstrations in buffer
-        else:
-            print(f"Training behavior cloning for {args.bc_steps} steps using teacher demonstrations.")
-            bc_optimizer = torch.optim.Adam(
-                [p for p in policy.parameters() if p.requires_grad],
-                lr=args.learning_rate,
-                eps=1e-4,
-            )
+            if args.bc:
+                print(f"Training behavior cloning for {args.bc_steps} steps using teacher demonstrations.")
+                bc_optimizer = torch.optim.Adam(
+                    [p for p in policy.parameters() if p.requires_grad],
+                    lr=args.learning_rate,
+                    eps=1e-4,
+                )
 
-            for bc_step in range(args.bc_steps):
-                # Sample transitions
-                samples = buffer.sample(args.batch_size)
-                if samples is None:
-                    print("No demonstrations in buffer; stopping behavior cloning.")
-                    break
+                for bc_step in range(args.bc_steps):
+                    # Sample transitions
+                    samples = buffer.sample(args.batch_size)
+                    if samples is None:
+                        print("No demonstrations in buffer; stopping behavior cloning.")
+                        break
 
-                obs_b, act_b, obs_next_b, rew_b, done_b = samples
+                    obs_b, act_b, obs_next_b, rew_b, done_b = samples
 
-                # Compute log-probabilities over actions from the policy
-                _, logp_nodes = policy.get_action(obs_b, val=True)
+                    # Compute log-probabilities over actions from the policy
+                    _, logp_nodes = policy.get_action(obs_b, val=True)
 
-                # Map per-graph action indices to node indices
-                act_nodes = act_b + obs_b.act_offsets
-                logp_selected = logp_nodes[act_nodes]
+                    # Map per-graph action indices to node indices
+                    act_nodes = act_b + obs_b.act_offsets
+                    logp_selected = logp_nodes[act_nodes]
 
-                bc_loss = -logp_selected.mean()
+                    bc_loss = -logp_selected.mean()
 
-                bc_optimizer.zero_grad()
-                bc_loss.backward()
-                bc_optimizer.step()
+                    bc_optimizer.zero_grad()
+                    bc_loss.backward()
+                    bc_optimizer.step()
 
-                if bc_step % 100 == 0:
-                    print(f"[BC] step {bc_step}/{args.bc_steps}, loss={bc_loss.item():.4f}")
-                    if args.use_tb:
-                        writer.add_scalar("bc/loss", bc_loss.item(), bc_step)
+                    if bc_step % 100 == 0:
+                        print(f"[BC] step {bc_step}/{args.bc_steps}, loss={bc_loss.item():.4f}")
+                        if args.use_tb:
+                            writer.add_scalar("bc/loss", bc_loss.item(), bc_step)
 
-            # Save policy and buffer to bc_ckpt after BC so you can load both later
-            torch.save({"policy_state_dict": policy.state_dict()}, args.bc_ckpt)
-            
+                # Save policy and buffer to demo_ckpt after BC so you can load both later
+                torch.save({
+                    "policy_state_dict": policy.state_dict(),
+                    "buffer_state_dict": buffer.get_state_dict(),
+                }, f"saved/demo/{args.gnn}/{args.teacher_method}_{time_string}.ckpt")
+
     
     # Setup optimizers with appropriate learning rates
     lr = args.learning_rate
@@ -388,10 +387,10 @@ if __name__ == "__main__":
                     return_indices=True
                 )
                 
-                if len(samples) == 7:
-                    obs_b, act_b, obs_next_b, rew_b, done_b, weights, sample_indices = samples
-                elif len(samples) == 6:
-                    obs_b, act_b, obs_next_b, rew_b, done_b, weights = samples
+                if len(samples) == 6:
+                    obs_b, act_b, obs_next_b, rew_b, done_b, sample_indices = samples
+                elif len(samples) == 5:
+                    obs_b, act_b, obs_next_b, rew_b, done_b = samples
 
                 # ---------------  CRITIC Training--------------------------------
                 with torch.no_grad():
@@ -414,9 +413,9 @@ if __name__ == "__main__":
                 q1_b = qf1(obs_b).gather(0, act_b).flatten()
                 q2_b = qf2(obs_b).gather(0, act_b).flatten()
                 
-                # Apply importance sampling weights to Q-loss
-                q1_loss = (weights * mse_loss(q1_b, q_target_b, reduction='none')).mean()
-                q2_loss = (weights * mse_loss(q2_b, q_target_b, reduction='none')).mean()
+                # Apply importance sampling to Q-loss
+                q1_loss = (mse_loss(q1_b, q_target_b, reduction='none')).mean()
+                q2_loss = (mse_loss(q2_b, q_target_b, reduction='none')).mean()
                 q_loss = q1_loss + q2_loss
                 
                 # Add L2 regularization
@@ -446,7 +445,7 @@ if __name__ == "__main__":
                 
                 # original: policy_loss = scatter_add(v_b, b, dim_size=obs_b.batch_size).mean()
                 policy_loss_per_graph = scatter_add(v_b, b, dim_size=obs_b.batch_size)
-                policy_loss = (weights * policy_loss_per_graph).mean()
+                policy_loss = (policy_loss_per_graph).mean()
                 
                 # Compute policy gradient norm for DDPGfD priority update (after backward pass)
                 if sample_indices is not None:

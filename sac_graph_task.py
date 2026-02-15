@@ -89,7 +89,7 @@ class Args:
     """Initial reward shaping coefficient"""
 
     # Task_encoder_settings
-    task_encoder_pretrained_ckpt_pth: Optional[str]=None
+    task_encoder_pretrained_ckpt_pth: Optional[str]="saved/task_encoder/task_encoder_best.ckpt"
     """where task encoder pretrained checkpoint was saved"""
     fix_type: str = 'none'
     """Fix task encoder parameters: 'none', 'frozen', 'ewc'"""
@@ -272,9 +272,9 @@ if __name__ == "__main__":
             task_encoder.load_state_dict(ckpt["task_encoder_state_dict"])
         print(f"Loaded checkpoint: {args.ckpt_pth}")
     elif args.task_encoder_pretrained_ckpt_pth:
-        ckpt = torch.load("saved/task_encoder/task_encoder_best.ckpt", map_location=device)
+        ckpt = torch.load(args.task_encoder_pretrained_ckpt_pth, map_location=device)
         task_encoder.load_state_dict(ckpt["encoder_state_dict"])
-        print(f"Loaded task encoder from saved/task_encoder/task_encoder_best.ckpt")
+        print(f"Loaded task encoder from {args.task_encoder_pretrained_ckpt_pth}")
 
     # Freeze task encoder: no gradients, not updated by optimizer
     if args.fix_type == 'frozen':

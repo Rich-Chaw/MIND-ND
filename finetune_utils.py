@@ -7,7 +7,7 @@ from utils import Batch, ig_to_data
 
 
 def teacher_wrapper(graph, teacher_method='spectral', max_steps=None):
-    from baseline import spectral_dismantling, adaptive_betweenness, random_dismantling
+    from baseline import spectral_dismantling, adaptive_betweenness, adaptive_ci, random_dismantling
     if teacher_method == 'spectral':
         try:
             removals = spectral_dismantling(graph, max_steps=max_steps)
@@ -15,6 +15,8 @@ def teacher_wrapper(graph, teacher_method='spectral', max_steps=None):
             removals = adaptive_betweenness(graph, max_steps=max_steps)
     elif teacher_method == 'betweenness':
         removals = adaptive_betweenness(graph, max_steps=max_steps)
+    elif teacher_method == 'CI':
+        removals = adaptive_ci(graph, max_steps=max_steps)
     else:
         print(f"Unknown teacher method: {teacher_method}, using random")
         removals = random_dismantling(graph, max_steps=max_steps)

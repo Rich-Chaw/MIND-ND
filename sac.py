@@ -76,11 +76,7 @@ class Args:
 def create_run_path_and_save_args(args):
     now = datetime.now()
     time_string = now.strftime("%Y%m%d_%H%M%S")
-    run_path = f"sac_teacher"
-    if args.teacher_method:
-        run_path += f"_{args.teacher_method}"
-    if args.priority_type:
-        run_path += f"_{args.priority_type}"
+    run_path = f"{args.gnn}/sac"
     run_path += f"_{time_string}"
 
     with open(os.path.join("saved", run_path, "args.json"), "w") as f:

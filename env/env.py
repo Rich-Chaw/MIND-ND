@@ -14,7 +14,9 @@ class DismantleEnv:
             is_val: bool=False,
             seed: int=0,
             remove_scc: bool=True,
-            render: Union[bool, str] = False
+            render: Union[bool, str] = False,
+            reward_type: int = 0,
+            threshold: float = 0.1,
         ):
         if bool(data_dir) ^ bool(graph_data):
              if data_dir:
@@ -28,7 +30,9 @@ class DismantleEnv:
                         if not os.path.isfile(full_path):
                             continue
                         name = f'{os.path.basename(d)}_{os.path.splitext(os.path.basename(p))[0]}'
-                        graph_data.append(load_g(full_path, name))
+                        g = load_g(full_path, name)
+                        if g is not None:
+                            graph_data.append(g)
         else:
             raise ValueError("Need either data_dir or g_list (but not both).")
 
@@ -38,6 +42,9 @@ class DismantleEnv:
         self.is_val = is_val
         self.remove_scc = remove_scc
         self.render = render
+        self.reward_type = reward_type
+        self.threshold = threshold
+        self.prev_lcc_arr = None  # used for reward_type=1: (LCC_{t-1} - LCC_t)/N
 
     def reset(self):
         self.pool = GraphPool(
@@ -45,11 +52,15 @@ class DismantleEnv:
             self.batch_size, 
             self.rng, 
             self.is_val, 
-            self.render
+            self.render,
+            threshold=self.threshold,
         )
 
         if self.is_val and self.remove_scc:
             self.pool.prune_scc()
+
+        # Initial LCC/N = 1.0 for each graph (used for reward_type=1 first step)
+        self.prev_lcc_arr = np.ones(len(self.pool.graphs), dtype=np.float32)
         
         return [g.copy() for g in self.pool.graphs], {}
 
@@ -63,8 +74,14 @@ class DismantleEnv:
             self.pool.prune_scc()
 
         lcc_arr, done_arr, info = self.pool.get_lcc_sizes()
-        reward_arr = -lcc_arr
-
+        if self.reward_type == 0:
+            reward_arr = -lcc_arr
+        elif self.reward_type == 1:
+            # (LCC_{t-1} - LCC_t) / N = prev_lcc - lcc_arr (already normalized)
+            reward_arr = self.prev_lcc_arr - lcc_arr
+            self.prev_lcc_arr = lcc_arr.copy()
+        else:
+            raise ValueError(f"Unknown reward_type={self.reward_type}")
         if self.render:
             for logger in info:
                 print(f'{logger.name}, AUC={logger.auc:.2f}')
@@ -79,4 +96,6 @@ class DismantleEnv:
             replaced = self.pool.load_new_graph(done_id)
             if replaced:
                 replaced_ids.append(done_id)
+                if self.prev_lcc_arr is not None:
+                    self.prev_lcc_arr[done_id] = 1.0  # new graph starts with full LCC
         return [g.copy() for g in self.pool.graphs], replaced_ids

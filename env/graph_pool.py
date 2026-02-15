@@ -26,12 +26,14 @@ class GraphPool:
             rng: np.random.Generator, 
             is_val: bool = False, 
             render: bool = False,
+            threshold: float = 0.1,
         ):
         self.graph_data = graph_data    # all graphs
         self.size = size
         self.rng = rng
         self.is_val = is_val
         self.render = render
+        self.threshold = threshold
 
         self.graphs: List[ig.Graph] = []    # active graphs
 
@@ -102,7 +104,7 @@ class GraphPool:
         '''
         return:
             lcc_arr: lcc=lcc_size/n_init for each graph (B)
-            done_arr: if done for each graph lcc_size < 0.1  (B)
+            done_arr: if done for each graph (lcc_size < threshold or no edges) (B)
             Logger: Logger for each done graph
         '''
         b_size = len(self.graphs)
@@ -110,8 +112,7 @@ class GraphPool:
         for i, g in enumerate(self.graphs):
             lcc_size = g.connected_components().giant().vcount() / self.graphs[i]['n_init']
             lcc_arr[i] = lcc_size
-            # done_arr[i] = (lcc_size < 0.1)
-            done_arr[i] = (lcc_size < 0.1 or g.ecount == 0)
+            done_arr[i] = (lcc_size < self.threshold or g.ecount == 0)
             self.graphs[i]['gcc_eps'].append(lcc_size)
         return lcc_arr, done_arr, [Logger(self.graphs[i]) for i in np.where(done_arr)[0]]
    
