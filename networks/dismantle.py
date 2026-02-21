@@ -15,7 +15,7 @@ def load_sac_dismantler(F, H, K, gnn, device, ckpt_pth=None, positional_encoding
     qf1_target = SACQNetwork(F, H, K, gnn, positional_encoding).to(device)
     qf2_target = SACQNetwork(F, H, K, gnn, positional_encoding).to(device)
     if ckpt_pth != None:
-        ckpt = torch.load(ckpt_pth)
+        ckpt = torch.load(ckpt_pth, map_location=device)
         policy.load_state_dict(ckpt['policy_state_dict'])
         qf1.load_state_dict(ckpt['qf1_state_dict'])
         qf2.load_state_dict(ckpt['qf2_state_dict'])

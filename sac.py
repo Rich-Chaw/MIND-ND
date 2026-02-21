@@ -4,7 +4,8 @@ import time
 import torch
 import random
 import numpy as np
-from typing import Optional
+from typing import Optional, List
+from dataclasses import dataclass, field
 from collections import deque
 from dataclasses import dataclass
 from torch_scatter import scatter_add
@@ -67,11 +68,20 @@ class Args:
     positional_encoding: Optional[str]=None
     """node initial features: None = all ones, 'RW' = random walk return-probability encoding"""
 
+    reward_type: Optional[int] = 0
+    """0: -LCC_t/N   1:(LCC_t-1 - LCC_t) / N """
+
     # train_dir: str = 'graphs/train/100_200_ER_LPA_COPY_rw_10000'
     # valid_dir: str = 'graphs/valid/valid'
 
-    train_dir: str = 'graphs/train/100_200_SBM_DCSBM_LPA_COPY_6000'
-    valid_dir: str = 'graphs/valid/100_200_SBM_DCSBM_LPA_COPY_60'
+    # dataset directories
+    train_dir: List[str] = field(default_factory=lambda: [
+        'graphs/train/100_200_LFR_5000',
+        'graphs/train/100_200_LPA_Copy_ER_5000'
+    ])
+    valid_dir: List[str] = field(default_factory=lambda: [
+        'graphs/valid/valid'
+    ])
 
 def create_run_path_and_save_args(args):
     now = datetime.now()
@@ -79,6 +89,9 @@ def create_run_path_and_save_args(args):
     run_path = f"{args.gnn}/sac"
     run_path += f"_{time_string}"
 
+    directory = os.path.join('saved', run_path)
+    if not os.path.exists(directory):
+        os.makedirs(directory)
     with open(os.path.join("saved", run_path, "args.json"), "w") as f:
         json.dump(vars(args), f)
     
@@ -110,7 +123,8 @@ if __name__ == "__main__":
         batch_size=args.num_envs, 
         is_val=False, 
         seed=args.seed,
-        remove_scc=False
+        remove_scc=False,
+        reward_type=args.reward_type
     )
     env_val = DismantleEnv(
         data_dir=args.valid_dir, 

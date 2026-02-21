@@ -33,7 +33,7 @@ class Args:
     gnn: str='hgnn_v4'
     num_envs: int=64
     """number of parallel environments,default 64"""
-    total_steps: int=20000
+    total_steps: int=50000
     """number of training steps (transitions = steps*num_envs), default 200000"""
     buffer_size: int=1500000
     """size of the replay buffer, default 2000000"""
@@ -51,6 +51,10 @@ class Args:
     """target smoothing factor,default 1.0"""
     alpha: float=0.005
     """intensity of entropy regularization"""
+    alpha_adaptive: bool = False
+    """If True, tune alpha by minimizing J(alpha) = E[-alpha*log pi(a|s) - alpha*H_bar] in log-space."""
+    target_entropy: float = -1.0
+    """Target entropy H_bar for adaptive alpha (used when alpha_adaptive is True)."""
     gamma: float=0.99
     """Discount factor"""
     num_updates: int=12
@@ -81,7 +85,7 @@ class Args:
         'graphs/demo/100_200_LFR_3000',
         'graphs/demo/100_200_LPA_Copy_ER_3000'
     ])
-    num_demos: int = 3000
+    num_demos: int = 4000
     """Number of demonstrations to save"""
     demo_ckpt: Optional[str] = None
     bc: bool = False
@@ -115,12 +119,12 @@ class Args:
 
     # dataset directories
     train_dir: List[str] = field(default_factory=lambda: [
-        'graphs/train/100_150_SBM_DCSBM_LPA_COPY_ER_6000'
+        'graphs/train/100_200_LFR_5000',
+        'graphs/train/100_200_LPA_Copy_ER_5000'
     ])
     valid_dir: List[str] = field(default_factory=lambda: [
-        'graphs/valid/100_150_SBM_DCSBM_LPA_COPY_ER_60'
+        'graphs/valid/valid'
     ])
-
 
 from finetune_utils import teacher_wrapper, teacher_step, compute_reward_shaping
 
@@ -170,15 +174,14 @@ if __name__ == "__main__":
         is_val=False, 
         seed=args.seed,
         remove_scc=False,
-        reward_type=args.reward_type,
+        reward_type=args.reward_type
     )
     
     env_val = DismantleEnv(
         data_dir=args.valid_dir, 
         batch_size=args.num_envs, 
         is_val=True, 
-        seed=args.seed,
-        reward_type=args.reward_type,
+        seed=args.seed
     )
 
     if args.demo_dir:
@@ -188,7 +191,7 @@ if __name__ == "__main__":
             is_val=False, 
             seed=args.seed,
             remove_scc=False,
-            reward_type=args.reward_type,
+            reward_type=args.reward_type
         )
     else:
         env_demo = env
@@ -277,6 +280,8 @@ if __name__ == "__main__":
                     "buffer_state_dict": buffer.get_state_dict(),
                 }, f"saved/demo/{args.gnn}/{args.teacher_method}_{time_string}.ckpt")
 
+                # Cleanup
+                del obs_b, act_b, obs_next_b, rew_b, done_b
     
     # Setup optimizers with appropriate learning rates
     lr = args.learning_rate
@@ -288,6 +293,13 @@ if __name__ == "__main__":
     
     q_optimizer = torch.optim.Adam(q_params, lr=lr, eps=1e-4)
     policy_optimizer = torch.optim.Adam(policy_params, lr=lr, eps=1e-4)
+
+    log_alpha = None
+    alpha_optimizer = None
+    if args.alpha_adaptive:
+        log_alpha = torch.tensor(np.log(args.alpha), device=device, dtype=torch.float32, requires_grad=True)
+        alpha_optimizer = torch.optim.Adam([log_alpha], lr=lr, eps=1e-4)
+        print(f"Alpha adaptive: target_entropy H_bar = {args.target_entropy}")
     
     num_eps, num_updates = 0, 0
     auc_buffer = deque(maxlen=20)
@@ -392,13 +404,19 @@ if __name__ == "__main__":
                 elif len(samples) == 5:
                     obs_b, act_b, obs_next_b, rew_b, done_b = samples
 
+                # Current alpha (log-space when adaptive for numerical stability)
+                if args.alpha_adaptive:
+                    alpha = log_alpha.exp()
+                else:
+                    alpha = torch.tensor(args.alpha, device=device, dtype=torch.float32)
+
                 # ---------------  CRITIC Training--------------------------------
                 with torch.no_grad():
                     _, logp_next_b = policy.get_action(obs_next_b)
                     
                     qf1_next_b = qf1_target(obs_next_b)
                     qf2_next_b = qf2_target(obs_next_b)
-                    qf_next_b = torch.min(qf1_next_b, qf2_next_b)-args.alpha*logp_next_b
+                    qf_next_b = torch.min(qf1_next_b, qf2_next_b) - alpha.detach() * logp_next_b
                     
                     # use E[Q(s',a')|a'] instead of using MC
                     b = obs_next_b.batch[obs_next_b.non_omni_mask]
@@ -440,7 +458,7 @@ if __name__ == "__main__":
                 with torch.no_grad():
                     qf1_b = qf1(obs_b)
                     qf2_b = qf2(obs_b)
-                v_b = logp_b.exp()*(args.alpha*logp_b - torch.min(qf1_b, qf2_b))
+                v_b = logp_b.exp() * (alpha.detach() * logp_b - torch.min(qf1_b, qf2_b))
                 b = obs_b.batch[obs_b.non_omni_mask]
                 
                 # original: policy_loss = scatter_add(v_b, b, dim_size=obs_b.batch_size).mean()
@@ -467,6 +485,18 @@ if __name__ == "__main__":
                     policy_loss = policy_loss + args.regular_coeff * policy_l2_reg
                 
                 policy_optimizer.zero_grad(); policy_loss.backward(); policy_optimizer.step()
+
+                # ---------------  ADAPTIVE ALPHA (minimize J(alpha) = E[-alpha*log pi(a|s) - alpha*H_bar]) ---------------
+                if args.alpha_adaptive:
+                    logp_taken = logp_b.gather(0, act_b).flatten().detach()
+                    alpha_loss = (alpha * (-logp_taken - args.target_entropy)).mean()
+                    alpha_optimizer.zero_grad()
+                    alpha_loss.backward()
+                    alpha_optimizer.step()
+                    if args.use_tb and num_updates % args.target_frequency == 0:
+                        writer.add_scalar("entropy/entropy",logp_b.mean().item(), global_step)
+                        writer.add_scalar("entropy/alpha", alpha.item(), global_step)
+                        writer.add_scalar("entropy/alpha_loss", alpha_loss.item(), global_step)
                 
                 # Explicit cleanup of training tensors
                 del obs_b, act_b, obs_next_b, rew_b, done_b
@@ -494,4 +524,4 @@ if __name__ == "__main__":
                 gc.collect()
                 gc.collect()  # Double collection for stubborn references
 # Example usage:
-# python sac_teacher.py --use_tb --device cuda:0 --teacher_method betweenness --demo --reward_shaping
+# nohup python -u sac_teacher.py --use_tb --device cuda:0 --teacher_method betweenness --demo --reward_shaping > sac_teacher.out 2>&1 &

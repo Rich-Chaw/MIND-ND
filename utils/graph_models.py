@@ -240,11 +240,12 @@ def powerlaw(N,m,gamma):
     return ig.Graph.Static_Power_Law(n=N, m=m, exponent_out=gamma)
 
 def LPA(N, m, gamma):
-    g = ig.Graph(n=m+1)
-    for nidx in range(g.vcount()):
-        g.add_edges([(nidx, i) for i in range(nidx+1, g.vcount()) if i != nidx])
+    # g = ig.Graph(n=m+1)
+    # for nidx in range(g.vcount()):
+    #     g.add_edges([(nidx, i) for i in range(nidx+1, g.vcount()) if i != nidx])
+    g = ig.Graph.Full(m + 1)
     a = m * (gamma - 3)
-    for nidx in range(N - m - 1):
+    for nidx in range(m + 1, N):
         node_count = g.vcount()
         node_weights = [g.degree(i) + a for i in range(node_count)]
         if np.sum(node_weights) == 0:
@@ -257,9 +258,10 @@ def LPA(N, m, gamma):
 
 
 def copying_model(N, m, gamma):
-    g = ig.Graph(n=m+1)
-    for nidx in range(g.vcount()):
-        g.add_edges([(nidx, i) for i in range(nidx+1, g.vcount()) if i != nidx])
+    # g = ig.Graph(n=m+1)
+    # for nidx in range(g.vcount()):
+    #     g.add_edges([(nidx, i) for i in range(nidx+1, g.vcount()) if i != nidx])
+    g = ig.Graph.Full(m + 1)
     alpha = (2 - gamma) / (1 - gamma)
     if not 0 < alpha < 1:
         raise Exception("Alpha needs to be between 0 and 1")
@@ -280,7 +282,6 @@ def copying_model(N, m, gamma):
                         g.add_edge(nidx, rand_endpoint)
                         break
     return g
-
 
 def SBM(N,p_in,p_out,num_blocks=None, unbalanced = False):    
     """Generate a Stochastic Block Model (SBM) using igraph's built-in SBM function"""
@@ -475,6 +476,39 @@ def corrupting(g):
     
     return g
 
+def statistics(g):
+    import pandas as pd
+    leiden_comm = g.community_leiden(
+        objective_function="modularity", 
+        weights=None, 
+        resolution_parameter=1.0, 
+        n_iterations=2
+    )
+
+    if g.is_connected():
+        df = pd.DataFrame(columns=['Num_nodes','Num_edges','AvgDegree', 'Diam', 'AvgShortPath','Clustering Coffe','r','Q'])
+        N = g.vcount()
+        E = g.ecount()
+        AD = np.mean(g.degree())
+        CC = g.transitivity_avglocal_undirected() 
+        Diam = g.diameter()
+        AvgShortPath = g.average_path_length()
+        r = g.assortativity_degree()
+        Q = leiden_comm.modularity
+        df.loc[len(df)] = [N,E,AD, Diam, AvgShortPath,CC, r,Q]
+        return df
+        # print(df)
+    else: 
+        print("unconnected graph")
+        df = pd.DataFrame(columns=['Num_nodes','Num_edges','AvgDegree','Clustering Coffe','r','Q'])
+        N = g.vcount()
+        E = g.ecount()
+        AD = np.mean(g.degree())
+        CC = g.transitivity_avglocal_undirected() 
+        r = g.assortativity_degree()
+        Q = leiden_comm.modularity
+        df.loc[len(df)] = [N,E,AD,CC, r,Q]
+        return df
 
 def preprocess(g, target_min=200, target_max=300):
     """
