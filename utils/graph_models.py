@@ -288,7 +288,10 @@ def holme_kim(N, m, p):
         
     return g
 
-def forest_fire_graph(n, p, r=0.0, n_ambassadors=1):
+def forest_fire(n, p, r=0.0):
+    return ig.Graph.Forest_Fire(n, fw_prob=p, bw_factor=r, directed=False)
+
+def forest_fire_custom(n, p, r=0.0, n_ambassadors=1):
     """
     n: Total number of nodes
     p: Forward burning probability
@@ -344,6 +347,73 @@ def forest_fire_graph(n, p, r=0.0, n_ambassadors=1):
                     
     # Usually, we treat these as undirected for Modularity/Clustering analysis
     return g.as_undirected()
+
+def BTER(n, gamma=2.5, rho=0.7, eta=1.0):
+    """
+    Custom BTER implementation for igraph.
+    
+    :param degree_sequence: List of desired degrees for each node.
+    :param rho: Clustering parameter (scalar or list).
+    :param eta: Scaling parameter for global connectivity.
+    """
+    degrees = [int(d) for d in np.random.pareto(gamma, n) + 5]
+    degrees = sorted(degrees, reverse=True)
+    nodes = list(range(n))
+    
+    # Initialize an empty graph
+    g = ig.Graph(n)
+    
+    # Track 'excess' degrees (d_i - d_i_internal)
+    excess_degrees = np.array(degrees, dtype=float)
+    
+    # --- Phase 1: Local Community Structure ---
+    # Group nodes into blocks of size d_k + 1
+    i = 0
+    while i < n:
+        dk = degrees[i]
+        if dk <= 1:
+            i += 1
+            continue
+            
+        # Block size is dk + 1
+        block_indices = nodes[i : i + int(dk) + 1]
+        if len(block_indices) < 2:
+            break
+            
+        # Calculate connectivity for this block
+        # BTER typically uses a formula for rho based on degree, 
+        # but we'll use a constant rho for simplicity here.
+        p_k = rho 
+        
+        # Create an ER subgraph for this block
+        sub_g = ig.Graph.Erdos_Renyi(n=len(block_indices), p=p_k)
+        
+        # Add edges to the main graph and update excess degrees
+        for edge in sub_g.get_edgelist():
+            u, v = block_indices[edge[0]], block_indices[edge[1]]
+            if not g.are_connected(u, v):
+                g.add_edge(u, v)
+                excess_degrees[u] -= 1
+                excess_degrees[v] -= 1
+        
+        i += len(block_indices)
+
+    # --- Phase 2: Global Connectivity (Chung-Lu) ---
+    # Filter nodes with remaining degree requirements
+    excess_degrees[excess_degrees < 0] = 0
+    total_excess = np.sum(excess_degrees)
+    
+    if total_excess > 0:
+        # Probability of edge (i,j) ~ (d_i * d_j) / sum(d)
+        for u in range(n):
+            for v in range(u + 1, n):
+                p_uv = (excess_degrees[u] * excess_degrees[v]) / total_excess
+                if np.random.random() < p_uv:
+                    if not g.are_connected(u, v):
+                        g.add_edge(u, v)
+                        
+    return g
+
 
 def SBM(N,p_in,p_out,num_blocks=None, unbalanced = False):    
     """Generate a Stochastic Block Model (SBM) using igraph's built-in SBM function"""
