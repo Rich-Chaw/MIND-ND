@@ -7,10 +7,12 @@ Visualizes Modularity vs Assortativity by graph type (ER, LPA, Copy)
 import os
 import pickle
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 import igraph as ig
 from collections import Counter
 import warnings
+import powerlaw
 warnings.filterwarnings('ignore')
 
 def load_graphs(pkl_files):
@@ -33,6 +35,72 @@ def load_graphs(pkl_files):
                 continue
 
     return graphs
+
+def statistics(g):
+    leiden_comm = g.community_leiden(
+        objective_function="modularity", 
+        weights=None, 
+        resolution_parameter=1.0, 
+        n_iterations=2
+    )
+
+    if g.is_connected():
+        df = pd.DataFrame(columns=['Num_nodes','Num_edges','AvgDegree', 'Diam', 'AvgShortPath','Clustering Coffe','r','Q'])
+        N = g.vcount()
+        E = g.vcount()
+        AD = np.mean(g.degree())
+        CC = g.transitivity_avglocal_undirected() 
+        Diam = g.diameter()
+        AvgShortPath = g.average_path_length()
+        r = g.assortativity_degree()
+        Q = leiden_comm.modularity
+        df.loc[len(df)] = [N,E,AD, Diam, AvgShortPath,CC, r,Q]
+        return df
+        # print(df)
+    else: 
+        print("unconnected graph")
+        df = pd.DataFrame(columns=['Num_nodes','Num_edges','AvgDegree','Clustering Coffe','r','Q'])
+        N = g.vcount()
+        E = g.vcount()
+        AD = np.mean(g.degree())
+        CC = g.transitivity_avglocal_undirected() 
+        r = g.assortativity_degree()
+        Q = leiden_comm.modularity
+        df.loc[len(df)] = [N,E,AD,CC, r,Q]
+        return df
+
+def analyze_powerlaw(graph):
+    degrees = graph.degree()
+    
+    fit = powerlaw.Fit(degrees, discrete=True)
+    
+    # Calculate the Power-law Coefficient (alpha)
+    alpha = fit.power_law.alpha
+    xmin = fit.power_law.xmin
+    
+    # Significance Testing: Compare power_law vs exponential distribution
+    # R is the loglikelihood ratio. Positive R favors the first distribution.
+    R, p_value = fit.distribution_compare('power_law', 'exponential', normalized_ratio=True)
+    
+    print(f"--- Power-law Analysis ---")
+    print(f"Alpha (Coefficient): {alpha:.4f}")
+    print(f"xmin (Threshold): {xmin}")
+    print(f"Loglikelihood Ratio (R): {R:.4f}")
+    print(f"p-value: {p_value:.4f}")
+    
+    if R > 0 and p_value < 0.05:
+        print("Result: Power-law is significantly more likely than Exponential.")
+    else:
+        print("Result: Power-law distribution is NOT statistically significant.")
+
+    # 5. Visualization
+    plt.figure() 
+    fig = fit.plot_pdf(color='b', linewidth=2, label='Empirical Data')
+    fit.power_law.plot_pdf(color='r', linestyle='--', ax=fig, label='Power-law Fit')
+    plt.xlabel('Degree (k)')
+    plt.ylabel('P(k)')
+    plt.legend()
+    plt.show()
 
 def calculate_properties(graphs):
     """Calculate modularity and assortativity for all graphs"""

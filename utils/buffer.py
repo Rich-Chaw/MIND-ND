@@ -228,16 +228,16 @@ class PriorReplayBuffer():
 
     def save(self, path):
         """Save buffer state_dict to a file (torch.save)."""
-        torch.save(self.get_state(), path)
+        torch.save(self.get_state_dict(), path)
 
     def load(self, path):
         """
         Load buffer state_dict from a file (torch.save) or from a path.
-        Can also be used with a state_dict dict: buffer.load_state(torch.load(path)).
+        Can also be used with a state_dict dict: buffer.load_state_dict(torch.load(path)).
         """
         state_dict = torch.load(path, map_location="cpu")
         if isinstance(state_dict, dict) and "act_buffer" in state_dict:
-            self.load_state(state_dict)
+            self.load_state_dict(state_dict)
         else:
             raise ValueError(f"Invalid buffer checkpoint at {path}: expected state_dict dict with 'act_buffer'.")
 

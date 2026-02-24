@@ -27,7 +27,7 @@ def get_lcc_size(graph):
 def is_terminal(G,threshold):
     if threshold == None:
         target_size = 3
-    else: target_size = G['n_init']
+    else: target_size = int(G['n_init']*threshold)
 
     if G.vcount() < target_size or G.ecount() == 0:
         return True
@@ -370,15 +370,15 @@ METHODS = {
     "CI": adaptive_ci,
 }
 
-def baseline_dismantling(graph, methods,max_steps=None,visualize=False):
+def baseline_dismantling(graph, methods, max_steps=None, threshold=None,visualize=False):
     ensure_attribute(graph)
     methods_results = {}
     for name, func in methods.items():
         # Get the sequence of nodes to remove
-        removals = func(graph,max_steps=max_steps)
+        removals = func(graph,max_steps=max_steps, threshold=threshold)
 
         auc, r = evaluate_sol(graph,removals)
-        print(f"method {name}: AUC={auc}, Robustness={r}")
+        print(f"method {name}: AUC={auc:.6f}, Robustness={r:.6f}")
 
         methods_results[name] = removals
 

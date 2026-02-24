@@ -211,7 +211,7 @@ if __name__ == "__main__":
                 policy.load_state_dict(ckpt["policy_state_dict"])
                 print(f"Loaded behavior cloning checkpoint: {args.demo_ckpt}")
             if "buffer_state_dict" in ckpt:
-                buffer.load_state(ckpt["buffer_state"])
+                buffer.load_state_dict(ckpt["buffer_state_dict"])
                 print(f"Loaded {buffer.ptr} transitions from checkpoint in buffer.")
         
         else:

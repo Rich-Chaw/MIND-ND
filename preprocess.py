@@ -5,6 +5,8 @@ import sys
 import pandas as pd
 import os
 import importlib
+
+from scipy.integrate._ivp.radau import P
 from utils import graph_models,structural_diversity_analysis
 from utils.graph_models import *
 
@@ -16,7 +18,7 @@ def generate(topology,nrange = "100_200",num=10,is_rewiring=False):
     
     while idx < num:
         N = np.random.randint(n_min,n_max+1)
-        if topology in ['Ring','BA','Copy','LPA','ER']:
+        if topology in ['Ring','BA','Copy','LPA','ER','HK','PLC']:
             m = int(np.random.choice([1, 2, 3, 4, 5, 6, 8, 10],
                                     p=[1/12, 2/12, 2/12, 2/12, 2/12, 1/12, 1/12, 1/12]))
         if topology in ['SBM','DCSBM','Barbell','StarCom','RingCom']:
@@ -51,6 +53,31 @@ def generate(topology,nrange = "100_200",num=10,is_rewiring=False):
             gamma = 2.5 + np.random.rand()
             g = LPA(N, m, gamma)
             config = {'N':N,'m':m,'gamma':float(gamma)}
+        elif topology == 'PLC':
+            p = np.random.uniform(0.1,1.0)
+            g = powerlaw_cluster(N,m,p)
+            config = {'N':N,'m':m,'gamma':float(gamma),'p':p}
+        elif topology == 'HK':
+            p = np.random.uniform(0.1,1.0)
+            g = holme_kim(N,m,p)
+            config = {'N':N,'m':m,'p':p}
+        elif topology == 'FF':
+            p = np.random.uniform(0.2,0.4)
+            r = np.random.uniform(0.4,0.6)
+            g = forest_fire(N,p,r)
+            config = {'N':N,'p':p,'r':r}
+        elif topology == 'FFC':
+            p = np.random.uniform(0.2,0.4)
+            r = np.random.uniform(0.4,0.6)
+            n_amb = random.randint(1,3)
+            g = forest_fire_custom(N,p,r,n_amb)
+            config = {'N':N,'p':p,'r':r,'n_amb':n_amb}
+        elif topology == 'BTER':
+            gamma = 2.5 + np.random.rand()
+            rho = np.random.uniform(0.7,0.9)
+            eta = np.random.uniform(0.5,1.5)
+            g = BTER(N,gamma,rho,eta)
+            config = {'N':N,'gamma':float(gamma),'rho':float(rho),'eta':float(eta)}
         elif topology == 'SBM':
             num_blocks = np.random.randint(2,5)
             p_in = np.random.uniform(0.1,0.15)
@@ -137,14 +164,16 @@ if __name__ == "__main__":
     parser.add_argument("--save_dir", type=str, default="graphs/", help="The directory to save the graphs")
     parser.add_argument("--mode", type=str, default="train", help="The mode to run the script")
     parser.add_argument("--nrange", type=str, default="100_200", help="The range of the number of nodes")
-    parser.add_argument("--num", type=int, default=5000, help="The number of graphs to generate")
+    parser.add_argument("--num", type=int, default=1000, help="The number of graphs to generate")
     parser.add_argument("--with_label", type=bool, default=False, help="Whether to save the label")
     parser.add_argument("--is_rewiring", type=bool, default=False, help="Whether to rewire the graphs")
     args = parser.parse_args()
     
 
     # topologies = ['LFR']
-    topologies = ['LPA','Copy','ER']
+    # topologies = ['LPA','Copy','ER']
+    # topologies = ['FF']
+    topologies = ['LPA','Copy','ER','FF']
     # ['SBM','DCSBM','LPA','Copy','ER']
 
     dataset_name = f"{args.nrange}"

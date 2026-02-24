@@ -185,54 +185,6 @@ def WS(N, k, p):
     g = ig.Graph.Watts_Strogatz(1, N, nei, p)
     return g
 
-
-def watts_strogatz_custom(N, k, p):
-    """
-    Custom implementation of Watts-Strogatz model for more control
-    
-    Args:
-        N: Number of nodes
-        k: Each node is connected to k nearest neighbors (must be even)
-        p: Probability of rewiring each edge
-    
-    Returns:
-        igraph Graph object
-    """
-    if k % 2 != 0:
-        k += 1  # Make k even
-    
-    # Start with regular ring lattice
-    g = ig.Graph.Ring(N, directed=False)
-    
-    # Add additional edges to reach k neighbors
-    for i in range(2, k//2 + 1):
-        for node in range(N):
-            neighbor = (node + i) % N
-            if not g.are_connected(node, neighbor):
-                g.add_edge(node, neighbor)
-    
-    # Rewire edges with probability p
-    edges_to_rewire = []
-    for edge in g.get_edgelist():
-        if np.random.rand() < p:
-            edges_to_rewire.append(edge)
-    
-    for edge in edges_to_rewire:
-        # Remove old edge
-        g.delete_edges([edge])
-        
-        # Add new random edge (avoid self-loops and multiple edges)
-        node1 = edge[0]
-        attempts = 0
-        while attempts < 100:  # Prevent infinite loops
-            node2 = np.random.randint(N)
-            if node2 != node1 and not g.are_connected(node1, node2):
-                g.add_edge(node1, node2)
-                break
-            attempts += 1
-    
-    return g
-
 def configuration_model(degrees):
     return ig.Graph.Degree_Sequence(degrees, method="vl")
 
@@ -282,6 +234,116 @@ def copying_model(N, m, gamma):
                         g.add_edge(nidx, rand_endpoint)
                         break
     return g
+
+def powerlaw_cluster(N,m,p):
+    import networkx as nx
+    g_nx = nx.powerlaw_cluster_graph(n=N, m=m, p=p)
+    return ig.Graph.from_networkx(g_nx)
+
+def holme_kim(N, m, p):
+    """
+    another inplementation of powerlaw_cluster graph using igraph
+    N: total number of nodes
+    m: number of edges to add per new node (m > 1 for clustering)
+    p: probability of a Triad Formation (TF) step
+    """
+    # Start with a small clique of m+1 nodes so everyone has a neighbor
+    # g = ig.Graph.Full(m + 1)
+    g = ig.Graph.Star(m+1, center=m, mode="undirected")
+    
+    for nidx in range(m + 1, N):
+        # 1. Preferential Attachment (PA) Step
+        # Get nodes weighted by their degree
+        targets = []
+        possible_targets = list(range(g.vcount()))
+        node_weights = g.degree()
+        
+        # Select the first target using PA
+        first_target = random.choices(possible_targets, weights=node_weights, k=1)[0]
+        targets.append(first_target)
+        
+        # 2. Add remaining m-1 edges
+        while len(set(targets)) < m:
+            if random.random() < p:
+                # Triad Formation (TF): Try to connect to a neighbor of the last added target
+                neighbors = g.neighbors(targets[-1])
+                # Filter out nodes already connected to the new node
+                potential_neighbors = [n for n in neighbors if n not in targets]
+                
+                if potential_neighbors:
+                    new_target = random.choice(potential_neighbors)
+                    targets.append(new_target)
+                    continue
+
+            # PA: Standard preferential attachment
+            new_target = random.choices(possible_targets, weights=node_weights, k=1)[0]
+            if new_target not in targets:
+                targets.append(new_target)
+
+        # Add the new vertex and its edges
+        g.add_vertex()
+        # source = g.vcount() - 1
+        edges_to_add = [(nidx, t) for t in set(targets)]
+        g.add_edges(edges_to_add)
+        
+    return g
+
+def forest_fire_graph(n, p, r=0.0, n_ambassadors=1):
+    """
+    n: Total number of nodes
+    p: Forward burning probability
+    r: Backward burning ratio (relative to p)
+    """    
+    # Start with a single node
+    g = ig.Graph(directed=True)
+    g.add_vertex()
+    
+    # The burning probability for backward edges
+    p_back = p * r
+
+    for i in range(1, n):
+        new_node = i
+        g.add_vertex()
+        
+        # 1. Pick an ambassador (randomly from existing nodes)
+        ambassadors = random.sample(list(range(i)), min(n_ambassadors, i))
+        
+        # 2. Start the fire spread
+        burned = {new_node, }
+        queue = []
+        
+        for a in ambassadors:
+            g.add_edge(new_node, a)
+            burned.add(a)
+            queue.append(a)
+
+        while queue:
+            current = queue.pop(0)
+            
+            # Get neighbors (out-neighbors and in-neighbors)
+            out_neighbors = [v for v in g.neighbors(current, mode="out") if v not in burned]
+            in_neighbors = [v for v in g.neighbors(current, mode="in") if v not in burned]
+            
+            # Determine how many neighbors to "burn" using Geometric Distribution
+            # x ~ Geom(1-q) has mean q/(1-q)
+            n_out = np.random.geometric(1 - p) - 1 if p < 1 else len(out_neighbors)
+            n_in = np.random.geometric(1 - p_back) - 1 if p_back < 1 else len(in_neighbors)
+            
+            # Select the neighbors
+            to_burn = []
+            if out_neighbors:
+                to_burn.extend(random.sample(out_neighbors, min(n_out, len(out_neighbors))))
+            if in_neighbors:
+                to_burn.extend(random.sample(in_neighbors, min(n_in, len(in_neighbors))))
+            
+            for target in to_burn:
+                if target not in burned:
+                    g.add_edge(new_node, target)
+                    burned.add(target)
+                    queue.append(target)
+                    
+    # Usually, we treat these as undirected for Modularity/Clustering analysis
+    return g.as_undirected()
 
 def SBM(N,p_in,p_out,num_blocks=None, unbalanced = False):    
     """Generate a Stochastic Block Model (SBM) using igraph's built-in SBM function"""
