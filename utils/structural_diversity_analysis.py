@@ -15,6 +15,14 @@ import warnings
 import powerlaw
 warnings.filterwarnings('ignore')
 
+try:
+    from sklearn.cluster import KMeans
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.metrics import silhouette_score, adjusted_rand_score, normalized_mutual_info_score
+    _SKLEARN_AVAILABLE = True
+except ImportError:
+    _SKLEARN_AVAILABLE = False
+
 def load_graphs(pkl_files):
     """Load and convert graphs from pkl files"""
     graphs = []
@@ -30,6 +38,7 @@ def load_graphs(pkl_files):
                 adj_matrix = graph_dict['adj']
                 g = ig.Graph.Adjacency(adj_matrix.tolist(), mode="undirected")
                 topology = graph_dict['info']['topology']
+                g["config"] = {"topology": topology}
                 graphs.append((g, topology))
             except:
                 continue
@@ -103,8 +112,8 @@ def analyze_powerlaw(graph):
     plt.show()
 
 def calculate_properties(graphs):
-    """Calculate modularity and assortativity for all graphs"""
-    q_values, r_values, labels = [], [], []
+    """Calculate modularity, assortativity and clustering for all graphs; return a DataFrame."""
+    rows = []
     
     for i, graph in enumerate(graphs):
         if i % 1000 == 0:
@@ -121,15 +130,22 @@ def calculate_properties(graphs):
             # Assortativity
             r = graph.assortativity_degree()
             
-            q_values.append(q)
-            r_values.append(r)
-            labels.append(graph['config']['topology'])
+            # Clustering coefficient (average local transitivity)
+            clustering = graph.transitivity_avglocal_undirected()
+            
+            rows.append({
+                "Q": q,
+                "r": r,
+                "clustering": clustering,
+                "label": graph["config"]["topology"],
+            })
             
         except Exception as e:
             print(e)
             continue
     
-    return np.array(q_values), np.array(r_values), np.array(labels)
+    df = pd.DataFrame(rows)
+    return df
 
 def create_scatter_plot(q_values, r_values, labels, save_path=None):
     """Create scatter plot with topology labels"""
@@ -245,6 +261,8 @@ def main():
         'switched_graphs.pkl'
         # 'combined_graphs.pkl'
     ]
+    q_values, r_values, labels = calculate_properties(graphs)
+    X = np.column_stack([q_values, r_values])
     
     # Load and analyze
     graphs = load_graphs(pkl_files)
@@ -261,7 +279,9 @@ def main():
     for label in np.unique(labels):
         mask = labels == label
         q_sub, r_sub = q_values[mask], r_values[mask]
-        print(f"\n{label}: Q={q_sub.mean():.3f}±{q_sub.std():.3f}, r={r_sub.mean():.3f}±{r_sub.std():.3f}")
+    q_values, r_values, labels = calculate_properties(graphs)
+    
+    print(f"\n{label}: Q={q_sub.mean():.3f}±{q_sub.std():.3f}, r={r_sub.mean():.3f}±{r_sub.std():.3f}")
 
 if __name__ == "__main__":
     main()
