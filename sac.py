@@ -67,6 +67,8 @@ class Args:
     """apply instance normalization"""
     positional_encoding: Optional[str]=None
     """node initial features: None = all ones, 'RW' = random walk return-probability encoding"""
+    handcrafted_features: bool = False
+    """if True, use 5 handcrafted features: degree, avg_degree_neighbor, local_clustering, k_core, 1 (num_features forced to 5)"""
 
     reward_type: Optional[int] = 0
     """0: -LCC_t/N   1:(LCC_t-1 - LCC_t) / N """
@@ -79,7 +81,7 @@ class Args:
         # 'graphs/train/100_200_LFR_5000',
         'graphs/train/100_200_LPA_Copy_ER_5000',
         # 'graphs/train/100_200_BTER_2500',
-        'graphs/train/100_200_FF_2500_rewire',
+        # 'graphs/train/100_200_FF_2500_rewire',
         # 'graphs/train/100_200_LPA_Copy_ER_FF_10000'
     ])
     valid_dir: List[str] = field(default_factory=lambda: [
@@ -138,7 +140,9 @@ if __name__ == "__main__":
     
     buffer = ReplayBuffer(args.buffer_size, device)
 
-    policy, qf1, qf2, qf1_target, qf2_target = load_sac_dismantler(args.num_features, args.num_heads, args.num_mps, args.gnn, device, args.ckpt_pth, args.positional_encoding)
+    num_features = 5 if args.handcrafted_features else args.num_features
+    num_heads = 1 if args.handcrafted_features else args.num_heads  # 5 % 4 != 0 for MIND
+    policy, qf1, qf2, qf1_target, qf2_target = load_sac_dismantler(num_features, num_heads, args.num_mps, args.gnn, device, args.ckpt_pth, args.positional_encoding, args.handcrafted_features)
     q_optimizer = torch.optim.Adam(list(qf1.parameters()) + list(qf2.parameters()), lr=args.learning_rate, eps=1e-4)
     policy_optimizer = torch.optim.Adam(list(policy.parameters()), lr=args.learning_rate, eps=1e-4)
 

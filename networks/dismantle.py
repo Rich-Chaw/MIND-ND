@@ -2,18 +2,17 @@ import torch
 import torch.nn as nn
 from torch_scatter import scatter_log_softmax, scatter_max, scatter_mean
 
-from networks.mind import MIND
 from utils.graph_data import Batch
-from .gnn import GNN_ENCODER
+from .gnn_interface import GNN_ENCODER
 from .hypernetwork import Hypernetwork, FiLMGenerator
 
 
-def load_sac_dismantler(F, H, K, gnn, device, ckpt_pth=None, positional_encoding=None):
-    policy = SACPolicy(F, H, K, gnn, positional_encoding).to(device)
-    qf1 = SACQNetwork(F, H, K, gnn, positional_encoding).to(device)
-    qf2 = SACQNetwork(F, H, K, gnn, positional_encoding).to(device)
-    qf1_target = SACQNetwork(F, H, K, gnn, positional_encoding).to(device)
-    qf2_target = SACQNetwork(F, H, K, gnn, positional_encoding).to(device)
+def load_sac_dismantler(F, H, K, gnn, device, ckpt_pth=None, positional_encoding=None, handcrafted_features=False):
+    policy = SACPolicy(F, H, K, gnn, positional_encoding, handcrafted_features).to(device)
+    qf1 = SACQNetwork(F, H, K, gnn, positional_encoding, handcrafted_features).to(device)
+    qf2 = SACQNetwork(F, H, K, gnn, positional_encoding, handcrafted_features).to(device)
+    qf1_target = SACQNetwork(F, H, K, gnn, positional_encoding, handcrafted_features).to(device)
+    qf2_target = SACQNetwork(F, H, K, gnn, positional_encoding, handcrafted_features).to(device)
     if ckpt_pth != None:
         ckpt = torch.load(ckpt_pth, map_location=device)
         policy.load_state_dict(ckpt['policy_state_dict'])
@@ -30,9 +29,9 @@ def load_sac_dismantler(F, H, K, gnn, device, ckpt_pth=None, positional_encoding
 
 
 class SACPolicy(nn.Module):
-    def __init__(self, num_features, num_heads, num_mps, gnn, positional_encoding=None):
+    def __init__(self, num_features, num_heads, num_mps, gnn, positional_encoding=None, handcrafted_features=False):
         super().__init__()
-        self.graph_embedding = GNN_ENCODER[gnn](num_features, num_heads, num_mps, positional_encoding=positional_encoding)
+        self.graph_embedding = GNN_ENCODER[gnn](num_features, num_heads, num_mps, positional_encoding=positional_encoding, handcrafted_features=handcrafted_features)
         e_size = (num_features*num_mps)*2
 
         self.mlp = nn.Sequential(
@@ -69,9 +68,9 @@ class SACPolicy(nn.Module):
 
 
 class SACQNetwork(nn.Module):
-    def __init__(self, num_features, num_heads, num_mps, gnn, positional_encoding=None):
+    def __init__(self, num_features, num_heads, num_mps, gnn, positional_encoding=None, handcrafted_features=False):
         super().__init__()
-        self.graph_embedding = GNN_ENCODER[gnn](num_features, num_heads, num_mps, positional_encoding=positional_encoding)
+        self.graph_embedding = GNN_ENCODER[gnn](num_features, num_heads, num_mps, positional_encoding=positional_encoding, handcrafted_features=handcrafted_features)
         e_size = (num_features*num_mps)*2
 
         self.mlp = nn.Sequential(
@@ -92,9 +91,9 @@ class PPOPolicy(SACPolicy):
 
 
 class PPOVNetwork(nn.Module):
-    def __init__(self, num_features, num_heads, num_mps):
+    def __init__(self, num_features, num_heads, num_mps, gnn):
         super().__init__()
-        self.graph_embedding = MIND(num_features, num_heads, num_mps)
+        self.graph_embedding = GNN_ENCODER[gnn](num_features, num_heads, num_mps)
         # Extract only the graph embedding part (second half)
         e_size = num_features * num_mps
 

@@ -116,6 +116,8 @@ class Args:
     """apply instance normalization"""
     positional_encoding: Optional[str]=None
     """node initial features: None = all ones, 'RW' = random walk return-probability encoding"""
+    handcrafted_features: bool = False
+    """if True, use 5 handcrafted features: degree, avg_degree_neighbor, local_clustering, k_core, 1 (num_features forced to 5)"""
 
     # dataset directories
     train_dir: List[str] = field(default_factory=lambda: [
@@ -198,8 +200,10 @@ if __name__ == "__main__":
         
     buffer = PriorReplayBuffer(args.buffer_size, device)
 
-    # Load pretrained network 
-    policy, qf1, qf2, qf1_target, qf2_target = load_sac_dismantler(args.num_features, args.num_heads, args.num_mps, args.gnn, device, args.ckpt_pth, args.positional_encoding)
+    # Load pretrained network
+    num_features = 5 if args.handcrafted_features else args.num_features
+    num_heads = 1 if args.handcrafted_features else args.num_heads  # 5 % 4 != 0 for MIND
+    policy, qf1, qf2, qf1_target, qf2_target = load_sac_dismantler(num_features, num_heads, args.num_mps, args.gnn, device, args.ckpt_pth, args.positional_encoding, args.handcrafted_features)
     print(f"Loaded checkpoint: {args.ckpt_pth}")
     print(f"Teacher method: {args.teacher_method}")
     print(f"Priority sampling: {args.priority_type}")

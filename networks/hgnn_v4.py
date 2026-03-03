@@ -10,10 +10,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import MessagePassing, GraphNorm
 
-import sys
-import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.graph_data import Batch
+from .gnn_utils import _get_init_features, _read_out
 
 
 class LeanHybridConvV4(MessagePassing):
@@ -66,84 +64,27 @@ class LeanHybridConvV4(MessagePassing):
         
         return alpha_ij * msg
 
-
 class HGNN_V4(nn.Module):
-    def __init__(self, num_features, num_heads, num_mps, theta=0.5, positional_encoding=None):
+    def __init__(self, num_features, num_heads, num_mps, positional_encoding=None, handcrafted_features=False, **kwargs):
         super().__init__()
-        self.num_features = num_features
+        theta = kwargs.get('theta', 0.5)
+        self.num_features = 5 if handcrafted_features else num_features
         self.num_heads = num_heads
         self.num_mps = num_mps
         self.positional_encoding = positional_encoding
-
-        self.register_buffer("x_init", torch.ones(1, num_features))
-
+        self.handcrafted_features = handcrafted_features
         self.layers = nn.ModuleList([
-            LeanHybridConvV4(num_features, num_features, num_heads, theta=theta, layer=l + 1)
+            # LeanHybridConvV4(num_features, num_features, num_heads, theta=theta, layer=l + 1)
+            LeanHybridConvV4(num_features, num_features, theta=theta, layer=l + 1)
             for l in range(num_mps)
         ])
         self.graph_norm = GraphNorm(num_features * num_mps, eps=1e-4)
 
     def forward(self, g: Batch):
-        """Return x_profile (N, 2KF)."""
-        if self.positional_encoding == 'RW':
-            from utils.graph_data import random_walk_positional_encoding
-            x = random_walk_positional_encoding(g, self.num_features, self.x_init.device)
-        else:
-            x = self.x_init.expand(g.total_nodes, -1)
-        x_profile = torch.empty(g.total_nodes, self.num_features * self.num_mps, device=self.x_init.device)
-
+        x = _get_init_features(g, self.num_features, self.positional_encoding, self.handcrafted_features)
+        x_profile = torch.empty(g.total_nodes, self.num_features * self.num_mps, device=g.device)
         for k, layer in enumerate(self.layers):
             x = layer(x, g.edge_index)
             x_profile[:, k * self.num_features : (k + 1) * self.num_features] = x
-
         x_profile = self.graph_norm(x_profile, g.batch)
-        x_profile = torch.cat([
-            x_profile[g.non_omni_mask],
-            x_profile[g.omni_ids[g.batch_non_omni]]
-        ], dim=1)
-        return x_profile
-
-
-def test_hgnn_v4():
-    """Test HGNN_V4 output shape and compare with HGNN_V3."""
-    import numpy as np
-    from utils.graph_data import Graph, Batch
-
-    device = torch.device("cpu")
-
-    # Graph 1: triangle (3 nodes)
-    edge_index1 = np.array([[0, 1, 1, 2, 2, 0], [1, 0, 2, 1, 0, 2]], dtype=np.int64)
-    graph1 = Graph(edge_index1, 3)
-    # Graph 2: line (4 nodes)
-    edge_index2 = np.array([[0, 1, 1, 2, 2, 3], [1, 0, 2, 1, 3, 2]], dtype=np.int64)
-    graph2 = Graph(edge_index2, 4)
-
-    batch = Batch(device, [graph1, graph2])
-    num_features, num_heads, num_mps = 16, 4, 3
-
-    model = HGNN_V4(num_features, num_heads, num_mps)
-    with torch.no_grad():
-        output = model(batch)
-
-    N = batch.non_omni_mask.sum().item()
-    expected_dim = 2 * num_features * num_mps
-    print(f"[HGNN_V4] batch_size={batch.batch_size}, total_nodes={batch.total_nodes}, non_omni={N}")
-    print(f"[HGNN_V4] output shape: {output.shape} (expected ({N}, {expected_dim}))")
-
-    assert output.shape == (N, expected_dim), (
-        f"Output shape mismatch: {output.shape} vs ({N}, {expected_dim})"
-    )
-    print("HGNN_V4 shape test passed!")
-
-    # Same shape as V3
-    from networks.hgnn_v3 import HGNN_V3
-    model_v3 = HGNN_V3(num_features, num_heads, num_mps)
-    with torch.no_grad():
-        output_v3 = model_v3(batch)
-    assert output_v3.shape == output.shape, f"V3 {output_v3.shape} vs V4 {output.shape}"
-    print("HGNN_V4 and HGNN_V3 output shapes match.")
-    return output
-
-
-if __name__ == "__main__":
-    test_hgnn_v4()
+        return _read_out(x_profile, g)

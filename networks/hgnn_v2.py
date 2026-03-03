@@ -53,39 +53,28 @@ class OptimizedHybridLayer(MessagePassing):
 
 
 class HGNN_V2(nn.Module):
-    def __init__(self, num_features, num_heads, num_mps, alpha=0.1, theta=0.5, positional_encoding=None):
+    def __init__(self, num_features, num_heads, num_mps, alpha=0.1, theta=0.5, positional_encoding=None, handcrafted_features=False):
         super().__init__()
-        self.num_features = num_features  # F
+        self.num_features = 5 if handcrafted_features else num_features
         self.num_mps = num_mps  # K layers
         self.positional_encoding = positional_encoding
-        
-        # Initialize with all-ones features like MIND
-        self.register_buffer("x_init", torch.ones(1, num_features))
-        
+        self.handcrafted_features = handcrafted_features
+
         # Create optimized hybrid layers
         self.layers = nn.ModuleList([
-            OptimizedHybridLayer(num_features, num_features, alpha, math.log(theta / (l + 1) + 1)) 
+            OptimizedHybridLayer(self.num_features, self.num_features, alpha, math.log(theta / (l + 1) + 1))
             for l in range(num_mps)
         ])
-        
-        # Graph normalization for the profile
-        self.graph_norm = GraphNorm(num_features * num_mps, eps=1e-4)
+        self.graph_norm = GraphNorm(self.num_features * num_mps, eps=1e-4)
 
     def forward(self, g: Batch):
         '''
         return x_profile (N, 2KF) - concatenation of node and graph embeddings
         '''
-        # Initialize features for all nodes (N+B, F)
-        if self.positional_encoding == 'RW':
-            from utils.graph_data import random_walk_positional_encoding
-            x = random_walk_positional_encoding(g, self.num_features, self.x_init.device)
-        else:
-            x = self.x_init.expand(g.total_nodes, -1)
+        from .gnn_utils import _get_init_features
+        x = _get_init_features(g, self.num_features, self.positional_encoding, self.handcrafted_features)
         x_0 = x.clone()  # Keep initial features for residual connections
-        
-        # Store layer outputs for profile construction
-        x_profile = torch.empty(g.total_nodes, self.num_features * self.num_mps, 
-                               device=self.x_init.device)
+        x_profile = torch.empty(g.total_nodes, self.num_features * self.num_mps, device=g.device)
         
         # Apply optimized hybrid layers
         for k, layer in enumerate(self.layers):

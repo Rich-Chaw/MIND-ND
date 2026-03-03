@@ -57,7 +57,7 @@ def random_walk_positional_encoding(batch, num_features, device):
     returns to i after k steps, for k=1, 2, ..., num_features.
 
     Returns:
-        Tensor of shape (total_nodes, num_features) on the given device.
+        Tensor of shape (N, F) on the given device.
         Omni-nodes get zero encoding.
     """
     B = batch.batch_size
@@ -106,3 +106,88 @@ def random_walk_positional_encoding(batch, num_features, device):
         pe = torch.cat([pe_non_omni, omni_row], dim=0)  # (n_b+1, num_features)
         out_list.append(pe)
     return torch.cat(out_list, dim=0)
+
+
+def handcrafted_node_features(batch, device):
+    """
+    Compute handcrafted node features for a batch of graphs.
+    Features (5 dims): degree, average degree of neighbor, local clustering, k-core, 1 (normalization).
+    Omni-nodes get zero features.
+
+    Returns:
+        Tensor of shape (N, 5) on the given device.
+    """
+    B = batch.batch_size
+    num_nodes_b = batch.num_nodes_b.cpu().numpy()  # (B,) includes omni
+    edge_index_np = batch.edge_index.cpu().numpy()  # (2, E)
+    start_ids = np.zeros(B, dtype=np.int64)
+    if B > 1:
+        start_ids[1:] = np.cumsum(num_nodes_b[:-1])
+
+    out_list = []
+    for b in range(B):
+        start_id = int(start_ids[b])
+        n_b = int(num_nodes_b[b] - 1)  # non-omni nodes
+        if n_b == 0:
+            feats = np.zeros((1, 5), dtype=np.float32)
+            out_list.append(feats)
+            continue
+        mask = (
+            (edge_index_np[0] >= start_id) & (edge_index_np[0] < start_id + n_b) &
+            (edge_index_np[1] >= start_id) & (edge_index_np[1] < start_id + n_b)
+        )
+        local_ei = edge_index_np[:, mask] - start_id  # (2, E_b)
+        feats_b = _handcrafted_single_graph(local_ei, n_b)
+        omni_row = np.zeros((1, 5), dtype=np.float32)
+        feats = np.concatenate([feats_b, omni_row], axis=0)
+        out_list.append(feats)
+    out = np.concatenate(out_list, axis=0)
+    return torch.tensor(out, dtype=torch.float32, device=device)
+
+
+def _handcrafted_single_graph(edge_index, n):
+    """Compute 5 handcrafted features for one graph: degree, avg_deg_neighbor, clustering, k_core, 1."""
+    src, dst = edge_index[0], edge_index[1]
+    deg = np.bincount(src, minlength=n).astype(np.float64)
+    adj_list = [[] for _ in range(n)]
+    for i in range(edge_index.shape[1]):
+        u, v = int(src[i]), int(dst[i])
+        adj_list[u].append(v)
+
+    avg_deg_neighbor = np.zeros(n, dtype=np.float64)
+    for i in range(n):
+        if deg[i] > 0:
+            nb = np.array(adj_list[i], dtype=np.int64)
+            avg_deg_neighbor[i] = np.mean(deg[nb])
+
+    triangle_count = np.zeros(n, dtype=np.float64)
+    for i in range(edge_index.shape[1]):
+        u, v = int(src[i]), int(dst[i])
+        if u >= v:
+            continue
+        set_u = set(adj_list[u])
+        set_v = set(adj_list[v])
+        for c in set_u & set_v:
+            triangle_count[c] += 1
+    clustering = np.zeros(n, dtype=np.float64)
+    for i in range(n):
+        if deg[i] >= 2:
+            clustering[i] = triangle_count[i] / (deg[i] * (deg[i] - 1) / 2.0)
+
+    deg_int = np.maximum(deg.astype(np.int64), 0)
+    deg_current = deg_int.copy()
+    core = np.zeros(n, dtype=np.float64)
+    remaining = np.ones(n, dtype=bool)
+    while np.any(remaining):
+        idx_rem = np.where(remaining)[0]
+        deg_rem = deg_current[remaining]
+        i = idx_rem[np.argmin(deg_rem)]
+        k_val = float(deg_current[i])
+        core[i] = k_val
+        remaining[i] = False
+        for j in adj_list[i]:
+            if remaining[j] and deg_current[j] > 0:
+                deg_current[j] -= 1
+
+    ones = np.ones(n, dtype=np.float64)
+    return np.stack([deg, avg_deg_neighbor, clustering, core, ones], axis=1).astype(np.float32)

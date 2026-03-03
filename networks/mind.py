@@ -8,15 +8,15 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.graph_data import Batch
+from .gnn_utils import _get_init_features, _read_out
 
 
 
 class MINDConv(nn.Module):
     def __init__(self, F, H):
         super().__init__()
-        assert F%H == 0, f'num_features {F} not divisible by num_heads {H}'
+        assert F % H == 0, f'num_features {F} not divisible by num_heads {H}'
         self.F, self.H = F, H
-
         self.W_src = nn.Linear(F, F)
         self.W_dst = nn.Linear(F, F)
         self.mlp_a_src = nn.Sequential(
@@ -58,41 +58,23 @@ class MINDConv(nn.Module):
         return h_next.view(N, -1)
 
 
-
 class MIND(nn.Module):
-    def __init__(self, num_features, num_heads, num_mps, positional_encoding=None):
+    def __init__(self, num_features, num_heads, num_mps, positional_encoding=None, handcrafted_features=False):
         super().__init__()
-        self.num_features = num_features # F
+        self.num_features = 5 if handcrafted_features else num_features
+        self.num_heads = num_heads
+        self.num_mps = num_mps
         self.positional_encoding = positional_encoding
-        self.register_buffer("x_init", torch.ones(1, num_features))
-        self.num_mps = num_mps # K layers
-        self.convs = nn.ModuleList([MINDConv(num_features, num_heads) for _ in range(num_mps)])
-        self.graph_norm = GraphNorm(num_features*num_mps, eps=1e-4)
+        self.handcrafted_features = handcrafted_features
+        self.convs = nn.ModuleList([MINDConv(self.num_features, num_heads) for _ in range(num_mps)])
+        self.graph_norm = GraphNorm(self.num_features * num_mps, eps=1e-4)
 
     def forward(self, g: Batch):
-        '''
-        return x_profile (N,2KF)
-        '''
-        # (N+B,KF)
-        x_profile = torch.empty(g.total_nodes, self.num_features*self.num_mps, device=self.x_init.device)
-        # (N+B,F)
-        if self.positional_encoding == 'RW':
-            from utils.graph_data import random_walk_positional_encoding
-            x_k = random_walk_positional_encoding(g, self.num_features, self.x_init.device)
-        else:
-            x_k = self.x_init.expand(g.total_nodes, -1)
+        x_k = _get_init_features(g, self.num_features, self.positional_encoding, self.handcrafted_features)
+        x_profile = torch.empty(g.total_nodes, self.num_features * self.num_mps, device=g.device)
         for k, conv in enumerate(self.convs):
             x_k = conv(x_k, g.edge_index)
-            x_profile[:, k*self.num_features : (k+1)*self.num_features] = x_k
+            x_profile[:, k * self.num_features : (k + 1) * self.num_features] = x_k
             x_k = torch.relu(x_k)
-        
-        x_profile = self.graph_norm(x_profile, g.batch) # (N+B,KF)
-        # x_profile = torch.cat([
-        #     x_profile[g.non_omni_mask],
-        #     x_profile[g.omni_ids][g.batch_non_omni]
-        # ], dim=1)
-        x_profile = torch.cat([
-            x_profile[g.non_omni_mask],
-            x_profile[g.omni_ids[g.batch_non_omni]]
-        ], dim=1)   #(N,2KF) concat(node_embedding, omni_node_embedding/graph_embedding)
-        return x_profile
+        x_profile = self.graph_norm(x_profile, g.batch)
+        return _read_out(x_profile, g)
