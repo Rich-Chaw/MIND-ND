@@ -24,12 +24,12 @@ def get_lcc_size(graph):
     components = graph.connected_components()
     return max(components.sizes())
 
-def is_terminal(G,threshold):
+def is_terminal(graph,threshold):
     if threshold == None:
         target_size = 3
-    else: target_size = int(G['n_init']*threshold)
+    else: target_size = int(graph['n_init']*threshold)
 
-    if G.vcount() < target_size or G.ecount() == 0:
+    if get_lcc_size(graph) < target_size or graph.ecount() == 0:
         return True
     else: return False
 
@@ -209,6 +209,32 @@ def adaptive_ci(G, max_steps=None, threshold=None):
     return removals
 
 
+def adaptive_greedy_lcc(G, max_steps=None, threshold=None):
+    """Greedy: at each step remove the node whose removal minimizes LCC of the remaining graph."""
+    temp_G = G.copy()
+    ensure_attribute(temp_G)
+    removals = []
+    if max_steps is None:
+        max_steps = temp_G.vcount()
+    else:
+        max_steps = min(temp_G.vcount(), max_steps)
+    for _ in range(max_steps):
+        if is_terminal(temp_G, threshold):
+            break
+        best_lcc = float("inf")
+        idx_to_remove = 0
+        for v in temp_G.vs:
+            g_test = temp_G.copy()
+            g_test.delete_vertices(v.index)
+            lcc = get_lcc_size(g_test)
+            if lcc < best_lcc:
+                best_lcc = lcc
+                idx_to_remove = v.index
+        removals.append(temp_G.vs[idx_to_remove]["static_id"])
+        temp_G.delete_vertices(idx_to_remove)
+    return removals
+
+
 def random_dismantling(G, max_steps=None, threshold=None):
     """Random dismantling for comparison"""
     temp_G = G.copy()
@@ -220,69 +246,10 @@ def random_dismantling(G, max_steps=None, threshold=None):
     
     # Return only max_steps nodes if specified
     if max_steps is not None:
-        return node_ids[:max_steps]
+        node_ids = node_ids[:max_steps]
     return node_ids
 
-def bpd_dismantling(G, max_steps=None, threshold=None):
-    """
-    Belief Propagation Decimation (Min-Sum inspired) for Network Dismantling.
-    Targets the Feedback Vertex Set (nodes that break cycles).
-    """
-    temp_G = G.copy()
-    ensure_attribute(temp_G)
-    removals = []
-    
-    if max_steps == None:
-        max_steps = temp_G.vcount()
-    else:
-        max_steps = min(temp_G.vcount(), max_steps)
-    
-    # Parameters for the BP algorithm
-    x = 10.0  # Sensitivity parameter (resembles inverse temperature)
-    
-    for _ in range(max_steps):
-        if is_terminal(temp_G,threshold): 
-            break
-        
-        N = temp_G.vcount()
-        edges = temp_G.get_edgelist()
-        adj = temp_G.get_adjlist()
-        
-        # Initialize messages for each directed edge (2 * E)
-        messages = {(u, v): 1.0/3.0 for u, v in edges}
-        messages.update({(v, u): 1.0/3.0 for u, v in edges})
-        
-        # Simple BP iteration (fixed number of steps for stability)
-        for _ in range(5):
-            new_messages = {}
-            for u, v in messages:
-                # Calculate the product of incoming messages from neighbors other than v
-                neighbors_of_u = adj[u]
-                prod_val = 1.0
-                for w in neighbors_of_u:
-                    if w != v:
-                        prod_val *= messages.get((w, u), 0.5)
-                
-                # Simplified update rule for the 'cavity' probability
-                new_messages[(u, v)] = np.tanh(x * prod_val)
-            messages.update(new_messages)
-            
-        # Compute marginals: How likely is this node to be part of a cycle?
-        marginals = np.zeros(N)
-        for i in range(N):
-            prod_all = 1.0
-            for neighbor in adj[i]:
-                prod_all *= messages.get((neighbor, i), 0.5)
-            marginals[i] = 1.0 - prod_all
-            
-        # Remove the node with the highest marginal probability
-        node_to_del_idx = np.argmax(marginals)
-        removals.append(temp_G.vs[node_to_del_idx]['static_id'])
-        temp_G.delete_vertices(node_to_del_idx)
-        
-    return removals
-
-def evaluate_sol(graph, removals, use_vertex_index=False):
+def evaluate_sol(graph, removals, threshold=None):
     '''
     Evaluate a dismantling solution by computing AUC and robustness
 
@@ -305,7 +272,7 @@ def evaluate_sol(graph, removals, use_vertex_index=False):
     gcc_eps = []
 
     for node_id in removals:
-        if temp_G.vcount() == 0:
+        if is_terminal(temp_G,threshold):
             break
         node_id = int(node_id)
         vertex_idx = [i for i, v in enumerate(temp_G.vs) if v['static_id'] == node_id][0]
@@ -323,6 +290,84 @@ def evaluate_sol(graph, removals, use_vertex_index=False):
     # robustness = sum(gcc_eps[::-1][:-1]) / n_init
     robustness = sum(gcc_eps) / n_init if gcc_eps else 0.0
     return auc, robustness
+
+
+def evaluate_sol_sir(graph, removals, n_removals=None, beta=0.2, gamma=0.1, n_simulations=50, max_steps=500, seed=None):
+    '''
+    Evaluate a dismantling solution using the Susceptible-Infected-Recovered (SIR) epidemic model.
+    Simulates epidemic spread on the graph *after* applying the removals; lower outbreak size
+    indicates better containment (removals are more effective from this perspective).
+
+    Args:
+        graph: igraph.Graph object
+        removals: list of node indices (static_id) in removal order
+        n_removals: number of removals to apply before SIR (default: all)
+        beta: per-edge infection probability per step
+        gamma: recovery probability per step (infected -> recovered)
+        n_simulations: number of SIR runs to average over (each with random initial infected)
+        max_steps: maximum SIR time steps per run
+        seed: random seed for reproducibility
+    Returns:
+        avg_outbreak_ratio: average (over runs) of (infected+recovered) / N_remaining
+        std_outbreak_ratio: standard deviation of outbreak ratio (optional stability measure)
+    '''
+    if len(removals) == 0:
+        print("empty removal when evaluate_sol_sir")
+        return 0.0, 0.0
+
+    rng = np.random.default_rng(seed)
+    temp_G = graph.copy()
+    ensure_attribute(temp_G)
+    n_apply = len(removals) if n_removals is None else min(n_removals, len(removals))
+
+    for node_id in removals[:n_apply]:
+        if temp_G.vcount() == 0:
+            break
+        node_id = int(node_id)
+        try:
+            vertex_idx = next(i for i, v in enumerate(temp_G.vs) if v['static_id'] == node_id)
+        except StopIteration:
+            continue
+        temp_G.delete_vertices(vertex_idx)
+
+    n_remaining = temp_G.vcount()
+    if n_remaining == 0:
+        return 0.0, 0.0
+
+    # state: 0 = S, 1 = I, 2 = R
+    outbreak_ratios = []
+    adj = temp_G.get_adjlist()
+
+    for _ in range(n_simulations):
+        state = np.zeros(n_remaining, dtype=np.int32)  # all S
+        initial_infected = rng.integers(0, n_remaining)
+        state[initial_infected] = 1
+
+        for _ in range(max_steps):
+            new_infections = set()
+            recoveries = []
+            for v in range(n_remaining):
+                if state[v] == 1:
+                    for u in adj[v]:
+                        if state[u] == 0 and u not in new_infections:
+                            if rng.random() < beta:
+                                new_infections.add(u)
+                    if rng.random() < gamma:
+                        recoveries.append(v)
+            for u in new_infections:
+                state[u] = 1
+            for v in recoveries:
+                state[v] = 2
+            if len(recoveries) == 0 and len(new_infections) == 0:
+                break
+
+        outbreak_size = np.sum(state >= 1)
+        outbreak_ratios.append(outbreak_size / n_remaining)
+
+    avg_outbreak_ratio = float(np.mean(outbreak_ratios))
+    std_outbreak_ratio = float(np.std(outbreak_ratios))
+    return avg_outbreak_ratio, std_outbreak_ratio
+
 
 def igraph_to_networkx(graph):
     edgelist = graph.get_edgelist()
@@ -363,7 +408,6 @@ METHODS = {
     "CoreHD": core_hd,
     "Spectral": spectral_dismantling,
     "Degree": adaptive_degree,
-    "BPD": bpd_dismantling,
     "BetweennessNA": betweenness,
     "Betweenness": adaptive_betweenness,
     "PageRank": adaptive_pagerank,

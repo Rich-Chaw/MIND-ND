@@ -288,6 +288,86 @@ def holme_kim(N, m, p):
         
     return g
 
+def NPSO(N, m, beta=0.8):
+    """
+    N: 节点总数
+    m: 每个新节点建立的连边数
+    beta: 流行度演化参数 (0-1), beta=1 为纯偏好附着
+    """
+    # 初始化图形
+    g = ig.Graph(directed=False)
+    g.add_vertices(N)
+    
+    # 存储坐标: [radius, theta]
+    coords = np.zeros((N, 2))
+    
+    # 初始化第一个节点
+    coords[0] = [0, np.random.uniform(0, 2 * np.pi)]
+    
+    for i in range(1, N):
+        # 1. 为新节点分配坐标
+        curr_r = 2 * np.log(i + 1)
+        curr_theta = np.random.uniform(0, 2 * np.pi)
+        coords[i] = [curr_r, curr_theta]
+        
+        # 2. 更新旧节点的径向坐标 (模拟漂移)
+        coords[:i, 0] = beta * coords[:i, 0] + (1 - beta) * curr_r
+        
+        # 3. 计算新节点 i 与所有旧节点 j 的双曲距离
+        if i > 0:
+            r_js = coords[:i, 0]
+            theta_js = coords[:i, 1]
+            
+            # 计算角度差 Delta Theta
+            d_theta = np.pi - np.abs(np.pi - np.abs(curr_theta - theta_js))
+            
+            # 计算近似双曲距离 (使用 log 空间避免数值溢出)
+            # x_ij = r_i + r_j + 2 * ln(d_theta / 2)
+            distances = curr_r + r_js + 2 * np.log(d_theta / 2 + 1e-10)
+            
+            # 4. 连接距离最近的 m 个节点
+            num_edges = min(i, m)
+            closest_indices = np.argsort(distances)[:num_edges]
+            
+            edges = [(i, int(idx)) for idx in closest_indices]
+            g.add_edges(edges)
+            
+    # 将坐标存入图属性中，方便后续分析
+    g.vs['r'] = coords[:, 0]
+    g.vs['theta'] = coords[:, 1]
+    
+    return g
+
+def RMAT(n_power, m_edges, a=0.45, b=0.15, c=0.15, d=0.25):
+    """
+    n_power: 矩阵阶数 (2^n_power 个节点)
+    m_edges: 总边数
+    a, b, c, d: 象限概率
+    """
+    N = 2**n_power
+    edges = set()
+    
+    for _ in range(m_edges):
+        x, y = 0, 0
+        for i in range(n_power):
+            r = np.random.random()
+            if r < a:
+                pass # 落在左上
+            elif r < a + b:
+                y += 2**(n_power - i - 1) # 落在右上
+            elif r < a + b + c:
+                x += 2**(n_power - i - 1) # 落在左下
+            else:
+                x += 2**(n_power - i - 1) # 落在右下
+                y += 2**(n_power - i - 1)
+        
+        # 避免自环
+        if x != y:
+            edges.add((x, y))
+            
+    g = ig.Graph.TupleList(edges, directed=False)
+    return g
+
 def forest_fire(n, p, r=0.0):
     return ig.Graph.Forest_Fire(n, fw_prob=p, bw_factor=r, directed=False)
 
@@ -489,6 +569,15 @@ def handler(signum, frame):
 def LFR(N, m, tau1, tau2, mu, min_comm=10, max_deg=None, seed=None, store_community=False, max_retries=10):
     '''
     linux version
+    N: number of nodes
+    m: average degree
+    tau1: degree distribution exponent
+    tau2: community size distribution exponent
+    mu: mixing parameter
+    min_comm: minimum community size
+    max_deg: maximum degree
+    seed: random seed
+    store_community: whether to store community membership
     '''
     import networkx as nx
     import signal

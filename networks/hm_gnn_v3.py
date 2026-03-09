@@ -1,10 +1,10 @@
 """
-HM-GNN v2: GAT + DiffPool + Cross-Channel Attention (CCA).
+HM-GNN v3: Batched variant of v2 to avoid CUDA OOM.
 
-- 通道独立路径：每通道使用 GATConv 做微观/池化/中观，dense_diff_pool 做图粗化。
-- 宏观 Readout 后广播回节点，三尺度 (micro, meso, macro) 拼接。
-- 跨通道融合使用 nn.MultiheadAttention (CCA)，HSIC 正则项约束通道独立性。
-- 与 MIND-ND 统一接口一致：forward(g: Batch) -> (N_non_omni, 2*num_features*num_mps)。
+- Same structure as v2: GAT + DiffPool + CCA + HSIC.
+- HSIC 按图批量化：在每张图内 (n_b, S) 上计算 HSIC，再求和，避免整批 N×N 矩阵 (OOM)。
+- 使用 utils/graph_data.Batch 的 start_ids / num_nodes_b 做按图切片，与 graph_data 批数据思路一致。
+- 接口与 v2 一致：forward(g: Batch) -> (N_non_omni, 2*num_features*num_mps)。
 """
 
 import torch
@@ -164,37 +164,67 @@ class CrossChannelAttention(nn.Module):
         return self.proj(out)
 
 
-# ---------- HSIC 正则项 ----------
-def hsic_linear(U, V):
-    """线性核 HSIC，用于约束通道表征独立。"""
-    N = U.size(0)
-    if N <= 1:
-        return torch.tensor(0.0, device=U.device, dtype=U.dtype)
-    H = torch.eye(N, device=U.device, dtype=U.dtype) - 1.0 / N
-    K = U @ U.t()
-    L = V @ V.t()
+# ---------- HSIC 正则项（v3：按图批量化，避免 N×N OOM）----------
+def _hsic_linear_single(U_b, V_b):
+    """单图线性核 HSIC。U_b, V_b: (n_b, S)，仅用于小 n_b，避免大矩阵。"""
+    n = U_b.size(0)
+    if n <= 1:
+        return torch.tensor(0.0, device=U_b.device, dtype=U_b.dtype)
+    H = torch.eye(n, device=U_b.device, dtype=U_b.dtype) - 1.0 / n
+    K = U_b @ U_b.t()
+    L = V_b @ V_b.t()
     K_c = H @ K @ H
     L_c = H @ L @ H
-    return (K_c * L_c).sum() / (N ** 2)
+    return (K_c * L_c).sum() / (n ** 2)
 
 
-def hsic_regularizer(channel_latents):
-    """多通道两两 HSIC 求和。channel_latents: list of (N, S) 或 (N, C, S)。"""
+def hsic_linear_batched(U, V, start_ids, num_nodes_b):
+    """
+    按图批量化 HSIC：每张图内只在非 omni 节点 (n_b, S) 上计算 HSIC 再求和。
+    U, V: (N, S); start_ids: (B,); num_nodes_b: (B,) 含 omni。每图非 omni 数 n_b = num_nodes_b - 1。
+    """
+    device, dtype = U.device, U.dtype
+    B = num_nodes_b.size(0)
+    n_non_omni = (num_nodes_b - 1).clamp(min=0)
+    total = torch.tensor(0.0, device=device, dtype=dtype)
+    for b in range(B):
+        n_b = n_non_omni[b].item()
+        if n_b <= 1:
+            continue
+        start = start_ids[b].item()
+        U_b = U[start : start + n_b]
+        V_b = V[start : start + n_b]
+        total = total + _hsic_linear_single(U_b, V_b)
+    return total
+
+
+def hsic_regularizer(channel_latents, start_ids=None, num_nodes_b=None):
+    """
+    多通道两两 HSIC 求和。
+    channel_latents: list of (N, S) 或 (N, C, S)。
+    若提供 start_ids, num_nodes_b（来自 Batch），则按图批量化计算，避免 N×N 显存。
+    """
     if isinstance(channel_latents, torch.Tensor):
         N, C, S = channel_latents.size()
         channel_latents = [channel_latents[:, c, :] for c in range(C)]
     total = torch.tensor(0.0, device=channel_latents[0].device, dtype=channel_latents[0].dtype)
     K = len(channel_latents)
+    batched = start_ids is not None and num_nodes_b is not None
     for i in range(K):
         for j in range(i + 1, K):
-            total = total + hsic_linear(channel_latents[i], channel_latents[j])
+            if batched:
+                total = total + hsic_linear_batched(
+                    channel_latents[i], channel_latents[j], start_ids, num_nodes_b
+                )
+            else:
+                total = total + _hsic_linear_single(channel_latents[i], channel_latents[j])
     return total
 
 
-# ---------- HM-GNN v2 顶层：与 MIND-ND 统一接口 ----------
-class HM_GNN_V2(nn.Module):
+# ---------- HM-GNN v3 顶层：批量化 HSIC，与 MIND-ND 统一接口 ----------
+class HM_GNN_V3(nn.Module):
     """
-    HM-GNN v2：GAT + DiffPool 层次路径 + MultiheadAttention CCA + HSIC 正则。
+    HM-GNN v3：与 v2 相同结构，HSIC 按图批量化以节省显存。
     forward(g: Batch) -> (N_non_omni, 2*num_features*num_mps)。
     """
     def __init__(self, num_features, num_heads, num_mps, positional_encoding=None, handcrafted_features=False, **kwargs):
@@ -232,7 +262,11 @@ class HM_GNN_V2(nn.Module):
         self._last_pool_loss = pool_loss_acc
 
         stacked_latents = torch.stack(channel_latents, dim=1)  # (N, C, num_mps)
-        self._hsic_loss.copy_(hsic_regularizer(stacked_latents).detach())
+        self._hsic_loss.copy_(hsic_regularizer(
+            stacked_latents,
+            start_ids=g.start_ids,
+            num_nodes_b=g.num_nodes_b,
+        ).detach())
 
         x_profile = self.cca(stacked_latents)  # (N, C*num_mps)
         x_profile = self.graph_norm(x_profile, g.batch)

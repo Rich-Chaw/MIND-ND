@@ -38,6 +38,7 @@ class Batch:
 
         self.num_nodes_b = torch.tensor(num_nodes_b, dtype=torch.long, device=self.device)
         self.total_nodes = self.num_nodes_b.sum() # N+B
+        self.start_ids = torch.tensor(start_ids, dtype=torch.long, device=self.device)  # (B), 供 GNN 批量化复用
 
         self.act_offsets = torch.tensor(act_offsets, dtype=torch.long, device=self.device) # (B)
 
@@ -113,6 +114,7 @@ def handcrafted_node_features(batch, device):
     Compute handcrafted node features for a batch of graphs.
     Features (5 dims): degree, average degree of neighbor, local clustering, k-core, 1 (normalization).
     Omni-nodes get zero features.
+    Batched: degree and avg_deg_neighbor in one shot; clustering and k-core per graph with vectorized torch.
 
     Returns:
         Tensor of shape (N, 5) on the given device.
@@ -191,3 +193,118 @@ def _handcrafted_single_graph(edge_index, n):
 
     ones = np.ones(n, dtype=np.float64)
     return np.stack([deg, avg_deg_neighbor, clustering, core, ones], axis=1).astype(np.float32)
+
+
+
+
+
+# def handcrafted_node_features(batch, device):
+#     """
+#     Compute handcrafted node features for a batch of graphs.
+#     Features (5 dims): degree, average degree of neighbor, local clustering, k-core, 1 (normalization).
+#     Omni-nodes get zero features.
+#     Batched: degree and avg_deg_neighbor in one shot; clustering and k-core per graph with vectorized torch.
+
+#     Returns:
+#         Tensor of shape (N, 5) on the given device.
+#     """
+#     B = batch.batch_size
+#     edge_index = batch.edge_index  # (2, E)
+#     non_omni = batch.non_omni_mask  # (total_nodes,)
+#     start_ids = batch.start_ids  # (B,)
+#     num_nodes_b = batch.num_nodes_b  # (B,) includes omni
+#     total_nodes = batch.total_nodes
+
+#     # Only edges between non-omni nodes (subgraph for degree/clustering)
+#     mask = non_omni[edge_index[0]] & non_omni[edge_index[1]]
+#     ei = edge_index[:, mask]  # (2, E')
+#     src, dst = ei[0], ei[1]
+
+#     # --- Batch-level: degree and avg_deg_neighbor in one shot (no per-graph loop) ---
+#     deg = torch.zeros(total_nodes, dtype=torch.float32, device=device)
+#     deg.scatter_add_(0, src, torch.ones(ei.size(1), dtype=torch.float32, device=device))
+#     sum_deg_neighbor = torch.zeros(total_nodes, dtype=torch.float32, device=device)
+#     sum_deg_neighbor.scatter_add_(0, src, deg[dst])
+#     deg_safe = deg.clamp(min=1e-8)
+#     avg_deg_neighbor = sum_deg_neighbor / deg_safe
+
+#     # Output tensor: (total_nodes, 5)
+#     feats = torch.zeros(total_nodes, 5, dtype=torch.float32, device=device)
+#     feats[:, 0] = deg
+#     feats[:, 1] = avg_deg_neighbor
+#     feats[non_omni, 4] = 1.0
+
+#     # --- Per-graph: clustering and k-core (vectorized torch, no Python inner loops) ---
+#     for b in range(B):
+#         start_id = start_ids[b].item()
+#         n_b = (num_nodes_b[b] - 1).item()
+#         if n_b <= 0:
+#             continue
+#         # Local edge index in [0, n_b)
+#         m = (ei[0] >= start_id) & (ei[0] < start_id + n_b) & (ei[1] >= start_id) & (ei[1] < start_id + n_b)
+#         local_ei = ei[:, m] - start_id  # (2, E_b)
+#         clustering_b, core_b = _handcrafted_clustering_kcore_torch(local_ei, n_b, device)
+#         feats[start_id : start_id + n_b, 2] = clustering_b
+#         feats[start_id : start_id + n_b, 3] = core_b
+
+#     # Omni-nodes: zero (feats already zeros; deg/avg_deg are 0 for omni since they're not in ei)
+#     return feats
+
+
+# def _handcrafted_clustering_kcore_torch(edge_index, n, device):
+#     """
+#     Vectorized clustering and k-core for one graph. edge_index: (2, E) local indices in [0, n).
+#     Returns clustering (n,), core (n,) on device.
+#     Clustering: sparse matmul O(E*n); k-core: packed adjacency O(deg) per iteration.
+#     """
+#     src, dst = edge_index[0], edge_index[1]
+#     E = edge_index.size(1)
+#     deg = torch.zeros(n, dtype=torch.float32, device=device)
+#     deg.scatter_add_(0, src, torch.ones(E, dtype=torch.float32, device=device))
+#     deg_int = deg.long().clamp(min=0)
+
+#     # Clustering: A2 = A @ A via sparse @ dense to avoid O(n^3). Skip if n too large to avoid O(n^2) mem.
+#     if E == 0:
+#         triangle_count = torch.zeros(n, dtype=torch.float32, device=device)
+#     else:
+#         A_sparse = torch.sparse_coo_tensor(
+#             torch.stack([src, dst]),
+#             torch.ones(E, dtype=torch.float32, device=device),
+#             (n, n),
+#         )
+#         A_dense = torch.zeros(n, n, dtype=torch.float32, device=device)
+#         A_dense[src, dst] = 1.0
+#         A2 = torch.sparse.mm(A_sparse, A_dense)  # O(E*n) instead of O(n^3)
+#         triangle_count = (A2 * A_dense).sum(dim=1) * 0.5  # (A2*A).sum = 2*num_triangles
+#     denom = deg * (deg - 1).clamp(min=1e-8)
+#     clustering = (2.0 * triangle_count / denom).clamp(max=1.0)
+
+#     # K-core: packed adjacency so neighbors of i are dst_sorted[offset[i]:offset[i+1]]
+#     perm = src.argsort()
+#     dst_sorted = dst[perm]
+#     offset = torch.cat([
+#         torch.zeros(1, dtype=torch.long, device=device),
+#         deg_int.cumsum(0),
+#     ])
+
+#     deg_current = deg_int.clone()
+#     core = torch.zeros(n, dtype=torch.float32, device=device)
+#     remaining = torch.ones(n, dtype=torch.bool, device=device)
+#     inf_f32 = torch.tensor(float('inf'), dtype=torch.float32, device=device)
+#     for _ in range(n):
+#         if not remaining.any():
+#             break
+#         deg_rem = torch.where(remaining, deg_current.float(), inf_f32)
+#         i = deg_rem.argmin().item()
+#         if not remaining[i]:
+#             break
+#         core[i] = float(deg_current[i])
+#         remaining[i] = False
+#         lo, hi = offset[i].item(), offset[i + 1].item()
+#         if lo < hi:
+#             j_nodes = dst_sorted[lo:hi]
+#             j_remaining = j_nodes[remaining[j_nodes]]
+#             if j_remaining.numel() > 0:
+#                 deg_current[j_remaining] = (deg_current[j_remaining] - 1).clamp(min=0)
+
+#     return clustering, core

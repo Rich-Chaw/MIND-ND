@@ -68,6 +68,7 @@ class MIND(nn.Module):
         self.handcrafted_features = handcrafted_features
         self.convs = nn.ModuleList([MINDConv(self.num_features, num_heads) for _ in range(num_mps)])
         self.graph_norm = GraphNorm(self.num_features * num_mps, eps=1e-4)
+        self.register_buffer("x_init", torch.ones(1, num_features))
 
     def forward(self, g: Batch):
         x_k = _get_init_features(g, self.num_features, self.positional_encoding, self.handcrafted_features)

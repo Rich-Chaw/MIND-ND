@@ -28,7 +28,7 @@ class Args:
     """random seed"""
     device: str='cuda:0'
     """the device to use"""
-    gnn: str='mind'
+    gnn: str='gcn'
     num_envs: int=64
     """number of parallel environments,default 64"""
     total_steps: int=200000
@@ -79,7 +79,8 @@ class Args:
     # dataset directories
     train_dir: List[str] = field(default_factory=lambda: [
         # 'graphs/train/100_200_LFR_5000',
-        'graphs/train/100_200_LPA_Copy_ER_5000',
+        'graphs/train/100_200_BA_5000',
+        # 'graphs/train/100_200_LPA_Copy_ER_5000',
         # 'graphs/train/100_200_BTER_2500',
         # 'graphs/train/100_200_FF_2500_rewire',
         # 'graphs/train/100_200_LPA_Copy_ER_FF_10000'
@@ -98,7 +99,7 @@ def create_run_path_and_save_args(args):
     if not os.path.exists(directory):
         os.makedirs(directory)
     with open(os.path.join("saved", run_path, "args.json"), "w") as f:
-        json.dump(vars(args), f)
+        json.dump(vars(args), f, indent=4)
     
     return run_path, time_string
 

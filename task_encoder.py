@@ -15,7 +15,7 @@ from torch_scatter import scatter_mean
 
 from utils import load_g
 from utils.graph_data import Batch, ig_to_data
-from networks.gnn import GNN_ENCODER
+from networks.gnn_interface import GNN_ENCODER
 
 
 # --- Type -> group: SBM/DCSBM=0, LPA/COPY=1, ER=2 ---

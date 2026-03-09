@@ -15,6 +15,9 @@ from networks.idgnn import IDGCN, IDGAT, IDGIN, IDSAGE
 from networks.gcnii import GCNII
 from networks.hm_gnn import HM_GNN
 from networks.hm_gnn_v2 import HM_GNN_V2
+from networks.hm_gnn_v3 import HM_GNN_V3
+from networks.hm_gnn_v4 import HM_GNN_V4
+from networks.hm_gnn_v5 import HM_GNN_V5
 
 GNN_ENCODER = {
     'gcn':GCN,
@@ -33,6 +36,9 @@ GNN_ENCODER = {
     'hgnn_v4': HGNN_V4,
     'hm_gnn': HM_GNN,
     'hm_gnn_v2': HM_GNN_V2,
+    'hm_gnn_v3': HM_GNN_V3,
+    'hm_gnn_v4': HM_GNN_V4,
+    'hm_gnn_v5': HM_GNN_V5,
 }
 
 if __name__ == '__main__':
@@ -62,7 +68,8 @@ if __name__ == '__main__':
     num_heads = 4
     num_mps = 6
 
-    models_to_test = [GCN, GraphSAGE, GAT, HM_GNN, HM_GNN_V2, HGNN_V4, MIND]
+    # models_to_test = [GCN, GraphSAGE, GAT, HM_GNN, HM_GNN_V2, HM_GNN_V3, HGNN_V4, MIND]
+    models_to_test = [GAT]
     for ModelClass in models_to_test:
         print(f"\nTesting {ModelClass.__name__}...")
         model = ModelClass(num_features, num_heads, num_mps)

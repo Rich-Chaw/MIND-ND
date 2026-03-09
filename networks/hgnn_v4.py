@@ -74,11 +74,12 @@ class HGNN_V4(nn.Module):
         self.positional_encoding = positional_encoding
         self.handcrafted_features = handcrafted_features
         self.layers = nn.ModuleList([
-            # LeanHybridConvV4(num_features, num_features, num_heads, theta=theta, layer=l + 1)
-            LeanHybridConvV4(num_features, num_features, theta=theta, layer=l + 1)
+            LeanHybridConvV4(num_features, num_features, num_heads, theta=theta, layer=l + 1)
+            # LeanHybridConvV4(num_features, num_features, theta=theta, layer=l + 1)
             for l in range(num_mps)
         ])
         self.graph_norm = GraphNorm(num_features * num_mps, eps=1e-4)
+        self.register_buffer("x_init", torch.ones(1, num_features))
 
     def forward(self, g: Batch):
         x = _get_init_features(g, self.num_features, self.positional_encoding, self.handcrafted_features)

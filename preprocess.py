@@ -18,7 +18,7 @@ def generate(topology,nrange = "100_200",num=10,is_rewiring=False):
     
     while idx < num:
         N = np.random.randint(n_min,n_max+1)
-        if topology in ['Ring','BA','Copy','LPA','ER','HK','PLC','BTER']:
+        if topology in ['Ring','BA','Copy','LPA','ER','HK','PLC','BTER','NPSO']:
             m = int(np.random.choice([1, 2, 3, 4, 5, 6, 8, 10],
                                     p=[1/12, 2/12, 2/12, 2/12, 2/12, 1/12, 1/12, 1/12]))
         if topology in ['SBM','DCSBM','Barbell','StarCom','RingCom']:
@@ -78,6 +78,10 @@ def generate(topology,nrange = "100_200",num=10,is_rewiring=False):
             eta = np.random.uniform(0.5,1.5)
             g = BTER(N,gamma,rho,eta)
             config = {'N':N,'gamma':float(gamma),'rho':float(rho),'eta':float(eta)}
+        elif topology == 'NPSO':
+            beta = np.random.uniform(0.1,0.9)
+            g = NPSO(N,m,beta)
+            config = {'N':N,'m':m,'beta':float(beta)}
         elif topology == 'SBM':
             num_blocks = np.random.randint(2,5)
             p_in = np.random.uniform(0.1,0.15)
@@ -176,8 +180,10 @@ if __name__ == "__main__":
 
     # topologies = ['LFR']
     # topologies = ['LPA','Copy','ER']
-    topologies = ['FF']
+    # topologies = ['FF']
     # topologies = ['BTER']
+    # topologies = ['NPSO']
+    topologies = ['BA']
     # ['SBM','DCSBM','LPA','Copy','ER']
 
     dataset_name = f"{args.nrange}"
