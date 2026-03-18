@@ -9,6 +9,7 @@ from networks.hgnn import HGNN
 from networks.hgnn_v2 import HGNN_V2
 from networks.hgnn_v3 import HGNN_V3
 from networks.hgnn_v4 import HGNN_V4
+from networks.hgnn_v5 import HGNN_V5
 from networks.classical_gnns import GCN, GraphSAGE, GAT
 from networks.mind import MIND
 from networks.idgnn import IDGCN, IDGAT, IDGIN, IDSAGE
@@ -34,6 +35,7 @@ GNN_ENCODER = {
     'hgnn_v2': HGNN_V2,
     'hgnn_v3': HGNN_V3,
     'hgnn_v4': HGNN_V4,
+    'hgnn_v5': HGNN_V5,
     'hm_gnn': HM_GNN,
     'hm_gnn_v2': HM_GNN_V2,
     'hm_gnn_v3': HM_GNN_V3,

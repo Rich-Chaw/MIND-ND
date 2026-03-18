@@ -69,7 +69,7 @@ def statistics(graph):
         df.loc[len(df)] = [N,E,AD,CC, r,Q]
         return df
 
-def analyze_powerlaw(graph):
+def analyze_powerlaw(graph, info=False):
     degrees = graph.degree()
     
     fit = powerlaw.Fit(degrees, discrete=True)
@@ -81,26 +81,29 @@ def analyze_powerlaw(graph):
     # Significance Testing: Compare power_law vs exponential distribution
     # R is the loglikelihood ratio. Positive R favors the first distribution.
     R, p_value = fit.distribution_compare('power_law', 'exponential', normalized_ratio=True)
+    if info:
+        print(f"--- Power-law Analysis ---")
+        print(f"Alpha (Coefficient): {alpha:.4f}")
+        print(f"xmin (Threshold): {xmin}")
+        print(f"Loglikelihood Ratio (R): {R:.4f}")
+        print(f"p-value: {p_value:.4f}")
     
-    print(f"--- Power-law Analysis ---")
-    print(f"Alpha (Coefficient): {alpha:.4f}")
-    print(f"xmin (Threshold): {xmin}")
-    print(f"Loglikelihood Ratio (R): {R:.4f}")
-    print(f"p-value: {p_value:.4f}")
-    
-    if R > 0 and p_value < 0.05:
-        print("Result: Power-law is significantly more likely than Exponential.")
-    else:
-        print("Result: Power-law distribution is NOT statistically significant.")
+        if R > 0 and p_value < 0.05:
+            print("Result: Power-law is significantly more likely than Exponential.")
+        else:
+            print("Result: Power-law distribution is NOT statistically significant.")
 
     # 5. Visualization
-    plt.figure() 
-    fig = fit.plot_pdf(color='b', linewidth=2, label='Empirical Data')
-    fit.power_law.plot_pdf(color='r', linestyle='--', ax=fig, label='Power-law Fit')
-    plt.xlabel('Degree (k)')
-    plt.ylabel('P(k)')
-    plt.legend()
-    plt.show()
+
+        plt.figure() 
+        fig = fit.plot_pdf(color='b', linewidth=2, label='Empirical Data')
+        fit.power_law.plot_pdf(color='r', linestyle='--', ax=fig, label='Power-law Fit')
+        plt.xlabel('Degree (k)')
+        plt.ylabel('P(k)')
+        plt.legend()
+        plt.show()
+
+    return alpha, xmin, R, p_value
 
 def calculate_properties(graphs):
     """Calculate modularity, assortativity and Clustering for all graphs; return a DataFrame."""

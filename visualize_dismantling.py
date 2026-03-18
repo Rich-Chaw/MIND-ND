@@ -164,19 +164,33 @@ def create_dismantling_process(graph, removals, method_name, max_steps=6):
     plt.tight_layout()
     plt.show()
 
-def visualize_multiple_curve(graph, methods_results,step_ratio = None, save_path=None):
+def visualize_multiple_curve(graph, methods_results,main_method=None,step_ratio = None, save_path=None):
     """Create a static comparison plot"""
     
     plt.figure(figsize=(12, 8))
     n_init = graph.vcount()
     # colors = ['blue', 'green', 'orange', 'purple']
-    colors = plt.cm.tab20(np.linspace(0, 2, 30))
+    # colors = plt.cm.tab20(np.linspace(0, 2, 30))
+    colors = [
+    "#92A478", "#B3DE69", "#F7B6D2", "#ACE0CF", "#7EA1EF", "#F19F69", "#C195C4", "#FFD966", "#BAB4D8", "#C27BA0", "#76A5AF", "#7E6FB1", "#C9B458"
+    ]
     
-    for i, (method_name, removals) in enumerate(methods_results.items()):
-        lcc_sizes,removed_sizes = get_curve_list(graph,removals,step_ratio)
-        x = np.array(removed_sizes) / n_init
-        y = np.array(lcc_sizes) / n_init
-        plt.plot(x, y, color=colors[i], linewidth=2,linestyle= '--',
+    for i, (method_name, result) in enumerate(methods_results.items()):
+        removals = result['removals']
+        lcc_sizes = result['lcc_sizes']
+        removed_sizes = result['removed_sizes']
+        # lambda_list = result['lambda_list']
+        
+        x = np.array(removed_sizes)
+        y = np.array(lcc_sizes)
+        
+        # lcc_sizes,removed_sizes = get_curve_list(graph,removals,step_ratio)
+        
+        if main_method is not None and method_name == main_method:
+            color = "#EA4252"
+        else:
+            color = colors[i]
+        plt.plot(x, y, color=color, linewidth=2,linestyle= '--',
                 marker='o', markersize=3, label=method_name, alpha=0.8)
     
     plt.xlabel('Fraction of Nodes Removed', fontsize=12)

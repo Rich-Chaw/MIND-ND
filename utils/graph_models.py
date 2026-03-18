@@ -798,8 +798,9 @@ def switch(g, order, type):
             break
     return g
 
-def rewiring(g,switch_type,r_coeff):
-    ordering = 'deg' if np.random.rand() <= 0.5 else 'rnd'
+def rewiring(g,switch_type,r_coeff,ordering=None):
+    if ordering is None:
+        ordering = 'deg' if np.random.rand() <= 0.5 else 'rnd'
     node_order = np.random.permutation(g.vcount()) if ordering == 'rnd' else g.degree()
     switch_no = 0
     while True:

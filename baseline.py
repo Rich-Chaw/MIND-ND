@@ -118,6 +118,39 @@ def adaptive_degree(G, max_steps=None, threshold=None):
         temp_G.delete_vertices(idx_to_remove)
     return removals
 
+def adaptive_k_shell(G, max_steps=None, threshold=None):
+    """Adaptive k-shell (coreness) based dismantling.
+    At each step, remove a node with the highest k-shell index; break ties by degree.
+    """
+    temp_G = G.copy()
+    ensure_attribute(temp_G)
+    removals = []
+
+    if max_steps is None:
+        max_steps = temp_G.vcount()
+    else:
+        max_steps = min(temp_G.vcount(), max_steps)
+
+    for _ in range(max_steps):
+        if is_terminal(temp_G, threshold):
+            break
+
+        coreness = temp_G.coreness()
+        max_core = max(coreness) if len(coreness) > 0 else 0
+        candidate_indices = [i for i, k in enumerate(coreness) if k == max_core]
+
+        if candidate_indices:
+            degrees = temp_G.degree(candidate_indices)
+            best_local = int(np.argmax(degrees))
+            idx_to_remove = candidate_indices[best_local]
+        else:
+            idx_to_remove = int(np.argmax(temp_G.degree()))
+
+        removals.append(temp_G.vs[idx_to_remove]['static_id'])
+        temp_G.delete_vertices(idx_to_remove)
+
+    return removals
+
 def betweenness(G, max_steps=None, threshold=None):
     """betweenness centrality dismantling - compute all betweenness from beginning"""
     temp_G = G.copy()
@@ -249,6 +282,31 @@ def random_dismantling(G, max_steps=None, threshold=None):
         node_ids = node_ids[:max_steps]
     return node_ids
 
+from scipy.integrate import simpson
+from scipy.sparse import csr_matrix
+from scipy.sparse.linalg import eigsh
+
+def _largest_eigenvalue(g: "ig.Graph") -> float:
+    """计算无向图邻接矩阵的最大特征值（谱半径）。"""
+    n = g.vcount()
+    if n == 0 or g.ecount() == 0:
+        return 0.0
+    edgelist = g.get_edgelist()
+    if not edgelist:
+        return 0.0
+    rows = [e[0] for e in edgelist]
+    cols = [e[1] for e in edgelist]
+    # 构造对称邻接矩阵
+    rows_sym = rows + cols
+    cols_sym = cols + rows
+    data_sym = np.ones(len(rows_sym), dtype=float)
+    A = csr_matrix((data_sym, (rows_sym, cols_sym)), shape=(n, n))
+    try:
+        vals = eigsh(A, k=1, which="LM", return_eigenvectors=False)
+        return float(vals[0])
+    except Exception:
+        return 0.0
+
 def evaluate_sol(graph, removals, threshold=None):
     '''
     Evaluate a dismantling solution by computing AUC and robustness
@@ -260,95 +318,86 @@ def evaluate_sol(graph, removals, threshold=None):
         auc: Area under the curve (using Simpson's rule) in MIND
         robustness: Robustness metric following FINDER C++ getRobustness implementation
     '''
+    """
+    使用结构性指标评估拆解序列。
+
+    返回：
+    - auc: 与原实现一致的 AUC（基于 LCC 比例的 Simpson 积分）
+    - robustness: 与原实现一致的鲁棒性指标
+    - lcc_sizes: 随拆除比例变化的 LCC 比例列表（长度为实际执行的删除步数）
+    - lambda_max_list: 随拆除比例变化的最大邻接矩阵特征值列表
+    - removed_sizes: 对应每一步的节点移除比例列表
+    """
     if len(removals) == 0:
         print("empty removal when evaluate sol")
-        return 0.0, 0.0
-
-    from scipy.integrate import simpson
+        return 0.0, 0.0, [], [], []
 
     temp_G = graph.copy()
     ensure_attribute(temp_G)
     n_init = temp_G['n_init']
-    gcc_eps = []
+
+    lcc_sizes = [n_init]
+    # lambda_max_list = [_largest_eigenvalue(temp_G)]
+    removed_sizes = [0]
+
+    removed_count = 0
 
     for node_id in removals:
-        if is_terminal(temp_G,threshold):
+        if is_terminal(temp_G, threshold):
             break
+
         node_id = int(node_id)
-        vertex_idx = [i for i, v in enumerate(temp_G.vs) if v['static_id'] == node_id][0]
+        # 按 static_id 找到当前图中的索引
+        vertex_idx = [i for i, v in enumerate(temp_G.vs) if v['static_id'] == node_id]
+        if not vertex_idx:
+            # 该点可能已被删除，跳过
+            continue
+        vertex_idx = vertex_idx[0]
         temp_G.delete_vertices(vertex_idx)
-        
-        # Calculate normalized LCC size after removal
+        removed_count += 1
+
+        # 计算 LCC 比例
         if temp_G.vcount() > 0:
             lcc_size = get_lcc_size(temp_G)
         else:
             lcc_size = 0.0
-        gcc_eps.append(lcc_size/n_init)
+        lcc_sizes.append(lcc_size / n_init)
+        removed_sizes.append(removed_count / n_init)
 
+        # 计算当前图的最大特征值
+        # lambda_max = _largest_eigenvalue(temp_G)
+        # lambda_max_list.append(lambda_max)
 
-    auc = simpson(gcc_eps, dx=1) if gcc_eps else 0.0
-    # robustness = sum(gcc_eps[::-1][:-1]) / n_init
-    robustness = sum(gcc_eps) / n_init if gcc_eps else 0.0
-    return auc, robustness
+    auc = simpson(lcc_sizes[1:], dx=1) if lcc_sizes else 0.0
+    robustness = sum(lcc_sizes[::-1][:-2]) / n_init if lcc_sizes else 0.0
+    return auc, robustness, lcc_sizes, removed_sizes
 
-
-def evaluate_sol_sir(graph, removals, n_removals=None, beta=0.2, gamma=0.1, n_simulations=50, max_steps=500, seed=None):
-    '''
-    Evaluate a dismantling solution using the Susceptible-Infected-Recovered (SIR) epidemic model.
-    Simulates epidemic spread on the graph *after* applying the removals; lower outbreak size
-    indicates better containment (removals are more effective from this perspective).
-
-    Args:
-        graph: igraph.Graph object
-        removals: list of node indices (static_id) in removal order
-        n_removals: number of removals to apply before SIR (default: all)
-        beta: per-edge infection probability per step
-        gamma: recovery probability per step (infected -> recovered)
-        n_simulations: number of SIR runs to average over (each with random initial infected)
-        max_steps: maximum SIR time steps per run
-        seed: random seed for reproducibility
-    Returns:
-        avg_outbreak_ratio: average (over runs) of (infected+recovered) / N_remaining
-        std_outbreak_ratio: standard deviation of outbreak ratio (optional stability measure)
-    '''
-    if len(removals) == 0:
-        print("empty removal when evaluate_sol_sir")
+def _sir_simulate_with_seeds(adj_list, n_nodes, seeds, beta, gamma, n_simulations, max_steps, rng):
+    """
+    在给定图（通过邻接表）和给定初始感染集合 seeds 上运行多次 SIR，
+    返回：平均最终感染比例、平均峰值感染比例。
+    """
+    if n_nodes == 0 or not seeds:
         return 0.0, 0.0
 
-    rng = np.random.default_rng(seed)
-    temp_G = graph.copy()
-    ensure_attribute(temp_G)
-    n_apply = len(removals) if n_removals is None else min(n_removals, len(removals))
-
-    for node_id in removals[:n_apply]:
-        if temp_G.vcount() == 0:
-            break
-        node_id = int(node_id)
-        try:
-            vertex_idx = next(i for i, v in enumerate(temp_G.vs) if v['static_id'] == node_id)
-        except StopIteration:
-            continue
-        temp_G.delete_vertices(vertex_idx)
-
-    n_remaining = temp_G.vcount()
-    if n_remaining == 0:
-        return 0.0, 0.0
-
-    # state: 0 = S, 1 = I, 2 = R
+    seeds = list(set(seeds))
     outbreak_ratios = []
-    adj = temp_G.get_adjlist()
+    peak_ratios = []
 
     for _ in range(n_simulations):
-        state = np.zeros(n_remaining, dtype=np.int32)  # all S
-        initial_infected = rng.integers(0, n_remaining)
-        state[initial_infected] = 1
+        state = np.zeros(n_nodes, dtype=np.int32)  # 0=S,1=I,2=R
+        for s in seeds:
+            if 0 <= s < n_nodes:
+                state[s] = 1
+
+        peak_infected = np.sum(state == 1)
 
         for _ in range(max_steps):
             new_infections = set()
             recoveries = []
-            for v in range(n_remaining):
+            for v in range(n_nodes):
                 if state[v] == 1:
-                    for u in adj[v]:
+                    for u in adj_list[v]:
                         if state[u] == 0 and u not in new_infections:
                             if rng.random() < beta:
                                 new_infections.add(u)
@@ -358,15 +407,179 @@ def evaluate_sol_sir(graph, removals, n_removals=None, beta=0.2, gamma=0.1, n_si
                 state[u] = 1
             for v in recoveries:
                 state[v] = 2
+
+            current_infected = np.sum(state == 1)
+            if current_infected > peak_infected:
+                peak_infected = current_infected
+
             if len(recoveries) == 0 and len(new_infections) == 0:
                 break
 
         outbreak_size = np.sum(state >= 1)
-        outbreak_ratios.append(outbreak_size / n_remaining)
+        outbreak_ratios.append(outbreak_size / n_nodes)
+        peak_ratios.append(peak_infected / n_nodes)
 
-    avg_outbreak_ratio = float(np.mean(outbreak_ratios))
-    std_outbreak_ratio = float(np.std(outbreak_ratios))
-    return avg_outbreak_ratio, std_outbreak_ratio
+    return float(np.mean(outbreak_ratios)), float(np.mean(peak_ratios))
+
+
+def evaluate_sir_seeds_as_sources(
+    graph,
+    removals,
+    beta=0.2,
+    gamma=0.1,
+    n_simulations=50,
+    max_steps=500,
+    seed=None,
+):
+    """
+    视角一：将拆解序列前 k 个节点作为 SIR 的感染源（Seeds）。
+
+    含义：如果前 k 个节点作为种子在 SIR 中引发的最终感染规模/峰值越大，
+    说明该拆解序列确实找到了具有强传播能力的“核心”节点。
+
+    返回：
+    - removed_sizes: 每个 k 对应的 k / N 初始节点比例
+    - final_outbreak_list: 对应的平均最终感染比例列表
+    - peak_outbreak_list: 对应的平均峰值感染比例列表
+    """
+    if len(removals) == 0:
+        print("empty removal when evaluate_sir_seeds_as_sources")
+        return [], [], []
+
+    rng = np.random.default_rng(seed)
+    temp_G = graph.copy()
+    ensure_attribute(temp_G)
+    n_init = temp_G.vcount()
+
+    # static_id -> index 映射在整个过程中保持不变（不删点）
+    id_to_idx = {v["static_id"]: i for i, v in enumerate(temp_G.vs)}
+    adj = temp_G.get_adjlist()
+
+    removed_sizes = [0]
+    final_outbreak_list = [0]
+    peak_outbreak_list = [0]
+
+    # 逐步增加 seed 集合的大小：k = 1,2,...,len(removals)
+    for k in range(1, len(removals) + 1):
+        current_seeds_ids = removals[:k]
+        current_seeds = [id_to_idx[sid] for sid in current_seeds_ids if sid in id_to_idx]
+
+        avg_final, avg_peak = _sir_simulate_with_seeds(
+            adj_list=adj,
+            n_nodes=n_init,
+            seeds=current_seeds,
+            beta=beta,
+            gamma=gamma,
+            n_simulations=n_simulations,
+            max_steps=max_steps,
+            rng=rng,
+        )
+
+        removed_sizes.append(k / n_init)
+        final_outbreak_list.append(avg_final)
+        peak_outbreak_list.append(avg_peak)
+
+    return removed_sizes, final_outbreak_list, peak_outbreak_list
+
+
+def evaluate_sir_after_removals(
+    graph,
+    removals,
+    beta=0.2,
+    gamma=0.1,
+    n_simulations=50,
+    max_steps=500,
+    seed=None,
+):
+    """
+    视角二：先从网络中删除前 k 个拆解节点，然后在残余网络中随机选择感染源做 SIR。
+
+    这对应“拆解之后的网络对流行病的抑制能力”。
+
+    返回：
+    - removed_sizes: 每个 k 对应的 k / N 初始节点比例
+    - final_outbreak_list: 对应的平均最终感染比例列表
+    - peak_outbreak_list: 对应的平均峰值感染比例列表
+    """
+    if len(removals) == 0:
+        print("empty removal when evaluate_sir_after_removals")
+        return [], [], []
+
+    rng = np.random.default_rng(seed)
+    temp_G = graph.copy()
+    ensure_attribute(temp_G)
+    n_init = temp_G.vcount()
+
+    removed_sizes = []
+    final_outbreak_list = []
+    peak_outbreak_list = []
+
+    # 逐步累积删除：k = 1,2,...,len(removals)
+    removed = 0
+    for k in range(1, len(removals) + 1):
+        node_id = int(removals[k - 1])
+        if temp_G.vcount() > 0:
+            vertex_idx = [i for i, v in enumerate(temp_G.vs) if v["static_id"] == node_id]
+            if vertex_idx:
+                temp_G.delete_vertices(vertex_idx[0])
+                removed += 1
+
+        n_remaining = temp_G.vcount()
+        if n_remaining == 0:
+            removed_sizes.append(removed / n_init)
+            final_outbreak_list.append(0.0)
+            peak_outbreak_list.append(0.0)
+            # 之后所有 k，网络都为空，直接填充 0
+            for kk in range(k + 1, len(removals) + 1):
+                removed_sizes.append(kk / n_init)
+                final_outbreak_list.append(0.0)
+                peak_outbreak_list.append(0.0)
+            break
+
+        adj = temp_G.get_adjlist()
+
+        outbreak_ratios = []
+        peak_ratios = []
+
+        for _ in range(n_simulations):
+            state = np.zeros(n_remaining, dtype=np.int32)
+            initial_infected = rng.integers(0, n_remaining)
+            state[initial_infected] = 1
+
+            peak_infected = 1
+
+            for _ in range(max_steps):
+                new_infections = set()
+                recoveries = []
+                for v in range(n_remaining):
+                    if state[v] == 1:
+                        for u in adj[v]:
+                            if state[u] == 0 and u not in new_infections:
+                                if rng.random() < beta:
+                                    new_infections.add(u)
+                        if rng.random() < gamma:
+                            recoveries.append(v)
+                for u in new_infections:
+                    state[u] = 1
+                for v in recoveries:
+                    state[v] = 2
+
+                current_infected = np.sum(state == 1)
+                if current_infected > peak_infected:
+                    peak_infected = current_infected
+
+                if len(recoveries) == 0 and len(new_infections) == 0:
+                    break
+
+            outbreak_size = np.sum(state >= 1)
+            outbreak_ratios.append(outbreak_size / n_remaining)
+            peak_ratios.append(peak_infected / n_remaining)
+
+        removed_sizes.append(removed / n_init)
+        final_outbreak_list.append(float(np.mean(outbreak_ratios)))
+        peak_outbreak_list.append(float(np.mean(peak_ratios)))
+
+    return removed_sizes, final_outbreak_list, peak_outbreak_list
 
 
 def igraph_to_networkx(graph):
@@ -400,10 +613,10 @@ def evaluate_sol_networkx(graph, removals):
     robustness = total_max_num / (num_nodes * num_nodes)
     
     return robustness
+    
 
-
-# Usage
-METHODS = {
+# Base methods that return only removals
+BASE_METHODS = {
     "Random": random_dismantling,
     "CoreHD": core_hd,
     "Spectral": spectral_dismantling,
@@ -414,17 +627,38 @@ METHODS = {
     "CI": adaptive_ci,
 }
 
-def baseline_dismantling(graph, methods, max_steps=None, threshold=None,visualize=False):
+
+def _wrap_with_runtime(func):
+    def wrapped(graph, max_steps=None, threshold=None):
+        start = time.time()
+        removals = func(graph, max_steps=max_steps, threshold=threshold)
+        runtime = time.time() - start
+        return removals, runtime
+
+    return wrapped
+
+
+# Public METHODS dict: functions must return (removals, runtime) for baseline_dismantling
+METHODS = {name: _wrap_with_runtime(f) for name, f in BASE_METHODS.items()}
+
+def baseline_dismantling(graph, methods, max_steps=None, threshold=0.1,visualize=False):
     ensure_attribute(graph)
     methods_results = {}
     for name, func in methods.items():
         # Get the sequence of nodes to remove
-        removals = func(graph,max_steps=max_steps, threshold=threshold)
+        removals, runtime = func(graph,max_steps=max_steps, threshold=threshold)
 
-        auc, r = evaluate_sol(graph,removals)
-        print(f"method {name}: AUC={auc:.6f}, Robustness={r:.6f}")
+        auc, r, lcc_sizes, removed_sizes = evaluate_sol(graph,removals,threshold=threshold)
+        print(f"method {name}: AUC={auc:.6f}, Robustness={r:.6f}, runtime={runtime:.6f}")
 
-        methods_results[name] = removals
+        methods_results[name] = {
+            'removals': removals,
+            'auc': auc,
+            'robustness': r,
+            'lcc_sizes': lcc_sizes,
+            'removed_sizes': removed_sizes,
+            # 'lambda_list': lambda_list,
+        }
 
     if visualize:
         from visualize_dismantling import visualize_multiple_curve
@@ -434,28 +668,49 @@ def baseline_dismantling(graph, methods, max_steps=None, threshold=None,visualiz
 
 #-----------------------------------------------------------------
 # Import FINDER methods
-def FINDER_dismantling(graph, max_steps=None):
+def FINDER_dismantling(graph, max_steps=None, threshold=None):
     from baseline_rl.FINDER import FINDER_wrapper
-    removals, score, MaxCCList = FINDER_wrapper(graph)
-    return removals
+    removals, score, MaxCCList, runtime = FINDER_wrapper(graph)
+    return removals, runtime
 
-def NIRM_dismantling(graph, max_steps=None):
+def NIRM_dismantling(graph, max_steps=None, threshold=None):
     from baseline_rl.NIRM import NIRM_wrapper
-    removals, score, MaxCCList = NIRM_wrapper(graph)
-    return removals
+    removals, runtime = NIRM_wrapper(graph)
+    return removals, runtime
+
+def GDM_dismantling(graph, max_steps=None, threshold=0.1):
+    from baseline_rl.GDM import GDM_wrapper
+    removals, score, MaxCCList, runtime = GDM_wrapper(graph,heuristic="GDM",threshold=threshold)
+    return removals, runtime
+
+def CoreGDM_dismantling(graph, max_steps=None, threshold=0.1):
+    from baseline_rl.GDM import GDM_wrapper
+    removals, score, MaxCCList, runtime = GDM_wrapper(graph,heuristic="CoreGDM",threshold=threshold)
+    return removals, runtime
+
+def GND_dismantling(graph, max_steps=None, threshold=0.1):
+    from baseline_rl.GND import GND_wrapper
+    removals, score, MaxCCList, runtime = GND_wrapper(graph,threshold=threshold)
+    return removals, runtime
+
+def DomiRank_dismantling(graph, max_steps=None, threshold=None):
+    from baseline_rl.DomiRank import DomiRank_wrapper
+    removals, score, MaxCCList, runtime = DomiRank_wrapper(graph)
+    return removals, runtime
+
+def TSAM_dismantling(graph, max_steps=None, threshold=0.1):
+    from baseline_rl.TSAM import TSAM_wrapper
+    removals, score, MaxCCList, runtime = TSAM_wrapper(graph, threshold=threshold)
+    return removals, runtime
 
 METHODS.update({
     "FINDER": FINDER_dismantling,
-    "NIRM": NIRM_dismantling
-})
-
-
-def gnd_wrapper(graph, max_steps=None):
-    """Wrapper for GND weighted dismantling"""
-    pass
-
-METHODS.update({
-    "GND": gnd_wrapper
+    "NIRM": NIRM_dismantling,
+    "GND": GND_dismantling,
+    "GDM": GDM_dismantling,
+    "CoreGDM": CoreGDM_dismantling,
+    "DomiRank": DomiRank_dismantling,
+    "TSAM": TSAM_dismantling,
 })
 
 

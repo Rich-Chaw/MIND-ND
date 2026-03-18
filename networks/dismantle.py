@@ -1,3 +1,5 @@
+import os
+import json
 import torch
 import torch.nn as nn
 from torch_scatter import scatter_log_softmax, scatter_max, scatter_mean
@@ -7,7 +9,19 @@ from .gnn_interface import GNN_ENCODER
 from .hypernetwork import Hypernetwork, FiLMGenerator
 
 
-def load_sac_dismantler(F, H, K, gnn, device, ckpt_pth=None, positional_encoding=None, handcrafted_features=False):
+def load_sac_dismantler(F=16, H=3, K=6, gnn=None, device=None, ckpt_pth=None, positional_encoding=None, handcrafted_features=False):
+    if ckpt_pth != None:
+        config_dir = os.path.dirname(ckpt_pth)
+        if os.path.exists(os.path.join(config_dir, 'args.json')):
+            with open(os.path.join(config_dir, 'args.json')) as f:
+                args = json.load(f)
+        F = args['num_features']
+        H = args['num_heads']
+        K = args['num_mps']
+        gnn = args['gnn']
+        positional_encoding = args['positional_encoding']
+        handcrafted_features = args['handcrafted_features']
+    
     policy = SACPolicy(F, H, K, gnn, positional_encoding, handcrafted_features).to(device)
     qf1 = SACQNetwork(F, H, K, gnn, positional_encoding, handcrafted_features).to(device)
     qf2 = SACQNetwork(F, H, K, gnn, positional_encoding, handcrafted_features).to(device)
@@ -124,6 +138,60 @@ def load_ppo_dismantler(F, H, K, device, ckpt_pth=None):
     
     return policy, vf
 
+def load_dqn_dismantler(F=16, H=3, K=6, gnn=None, device=None, ckpt_pth=None, positional_encoding=None, handcrafted_features=False):
+    if ckpt_pth != None:
+        config_dir = os.path.dirname(ckpt_pth)
+        if os.path.exists(os.path.join(config_dir, 'args.json')):
+            with open(os.path.join(config_dir, 'args.json')) as f:
+                args = json.load(f)
+            F = args['num_features']
+            H = args['num_heads']
+            K = args['num_mps']
+            gnn = args['gnn']
+            positional_encoding = args['positional_encoding']
+            handcrafted_features = args['handcrafted_features']
+    
+    qf = SACQNetwork(F, H, K, gnn, positional_encoding, handcrafted_features).to(device)
+    qf_target = SACQNetwork(F, H, K, gnn, positional_encoding, handcrafted_features).to(device)
+
+    if ckpt_pth is not None:
+        ckpt = torch.load(ckpt_pth, map_location=device)
+        if "qf_state_dict" in ckpt:
+            qf.load_state_dict(ckpt["qf_state_dict"])
+            qf_target.load_state_dict(ckpt.get("qf_target_state_dict", ckpt["qf_state_dict"]))
+        elif "qf1_state_dict" in ckpt:
+            qf.load_state_dict(ckpt["qf1_state_dict"])
+            qf_target.load_state_dict(ckpt.get("qf1_target_state_dict", ckpt["qf1_state_dict"]))
+        else:
+            raise KeyError(f"Checkpoint {ckpt_pth} does not contain DQN-compatible Q-network weights.")
+    else:
+        qf_target.load_state_dict(qf.state_dict())
+
+    return qf, qf_target
+
+class DQNPolicy(torch.nn.Module):
+    def __init__(self, qf: SACQNetwork):
+        super().__init__()
+        self.qf = qf
+
+    def forward(self, g: Batch):
+        return self.qf(g)
+
+    def get_action(self, g: Batch, epsilon: float = 0.0, val: bool = False):
+        q_vals = self.qf(g)
+        _, greedy_act = scatter_max(q_vals, g.batch_non_omni, dim_size=g.batch_size)
+        greedy_act = greedy_act - g.act_offsets
+
+        if val or epsilon <= 0.0:
+            return greedy_act, q_vals
+
+        random_mask = torch.rand(g.batch_size, device=q_vals.device) < epsilon
+        if random_mask.any():
+            num_actions = (g.num_nodes_b - 1).clamp(min=1)
+            random_act = (torch.rand(g.batch_size, device=q_vals.device) * num_actions.float()).long()
+            act = torch.where(random_mask, random_act, greedy_act)
+            return act, q_vals
+        return greedy_act, q_vals
 
 # ========== Task-Adaptive Networks with Shared Hypernetwork ==========
 

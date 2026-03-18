@@ -30,7 +30,7 @@ class Args:
     """random seed"""
     device: str='cuda:0'
     """the device to use"""
-    gnn: str='hgnn_v4'
+    gnn: str='hgnn_v5'
     num_envs: int=64
     """number of parallel environments,default 64"""
     total_steps: int=50000
@@ -82,10 +82,12 @@ class Args:
     demo: bool = False
     """Save demonstation in teacher buffer before training"""
     demo_dir: List[str] = field(default_factory=lambda: [
-        'graphs/demo/100_200_LFR_3000',
-        'graphs/demo/100_200_LPA_Copy_ER_3000'
+        # 'graphs/demo/100_200_LFR_3000',
+        # 'graphs/demo/100_200_LPA_Copy_ER_3000'
+        # 'graphs/train/100_150_SBM_DCSBM_LPA_COPY_ER_6000'
+        'graphs/train/100_200_BA_1000'
     ])
-    num_demos: int = 4000
+    num_demos: int = 1000
     """Number of demonstrations to save"""
     demo_ckpt: Optional[str] = None
     bc: bool = False
@@ -121,8 +123,10 @@ class Args:
 
     # dataset directories
     train_dir: List[str] = field(default_factory=lambda: [
+        'graphs/train/100_200_BA_5000',
         'graphs/train/100_200_LFR_5000',
         'graphs/train/100_200_LPA_Copy_ER_5000'
+        'graphs/train/100_150_SBM_DCSBM_LPA_COPY_ER_6000',
     ])
     valid_dir: List[str] = field(default_factory=lambda: [
         'graphs/valid/valid'

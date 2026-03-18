@@ -15,7 +15,8 @@ from torch_scatter import scatter_max
 
 from env import DismantleEnv
 from networks.dismantle import SACQNetwork, DQNPolicy, load_dqn_dismantler
-from utils import ReplayBuffer, Batch, validate, ig_to_data
+from utils import ReplayBuffer, PriorReplayBuffer, Batch, validate, ig_to_data
+from finetune_utils import teacher_wrapper, teacher_step, compute_reward_shaping
 
 
 @dataclass
@@ -78,6 +79,40 @@ class Args:
     max_grad_norm: float = 10.0
     """gradient clipping norm; <=0 disables clipping"""
 
+    # Teacher / demonstration settings
+    teacher_method: Optional[str] = None
+    """Teacher method: 'spectral', 'betweenness', 'CI','Hybrid' etc."""
+    demo: bool = False
+    """Collect teacher demonstrations before training"""
+    demo_dir: List[str] = field(default_factory=lambda: [
+        "graphs/train/100_200_BA_5000",
+    ])
+    num_demos: int = 1000
+    """Number of demonstration episodes to collect"""
+    demo_ckpt: Optional[str] = None
+    """Optional checkpoint that contains a saved teacher buffer state_dict"""
+
+    # Reward shaping settings
+    reward_shaping: bool = False
+    """Enable reward shaping"""
+    shaping_method: str = "KL"
+    """Reward shaping method: 'betweenness' or 'KL'"""
+    shaping_decay_steps: int = 10000
+    """Number of steps to decay reward shaping coefficient"""
+    shaping_coeff: float = 0.1
+    """Initial reward shaping coefficient"""
+
+    # Pretraining (DQNfD-style) settings
+    pretrain: bool = False
+    pretrain_steps: int = 10000
+    """Number of gradient steps for DQN pretraining on demonstrations"""
+    margin_value: float = 0.8
+    """Margin l in the large-margin classification loss"""
+    margin_coeff: float = 1.0
+    """λ1: weight for the large-margin loss J_E"""
+    l2_coeff: float = 1e-5
+    """λ2: weight for L2 regularization loss J_L2"""
+
     train_dir: List[str] = field(default_factory=lambda: [
         "graphs/train/100_200_BA_5000",
     ])
@@ -86,11 +121,12 @@ class Args:
     ])
 
 
+
 def create_run_path_and_save_args(args):
     now = datetime.now()
     time_string = now.strftime("%Y%m%d_%H%M%S")
     run_path = f"{args.gnn}/{args.algo}"
-    run_path += f"_{time_string}"
+    run_path += f"_teacher_{time_string}"
 
     directory = os.path.join("saved", run_path)
     if not os.path.exists(directory):
@@ -163,7 +199,21 @@ if __name__ == "__main__":
         seed=args.seed,
     )
 
-    buffer = ReplayBuffer(args.buffer_size, device)
+    # Demo environment (if provided), otherwise reuse training env
+    if args.demo_dir:
+        env_demo = DismantleEnv(
+            data_dir=args.demo_dir,
+            batch_size=args.num_envs,
+            is_val=False,
+            seed=args.seed,
+            remove_scc=False,
+            reward_type=args.reward_type,
+        )
+    else:
+        env_demo = env
+
+    # Use PriorReplayBuffer so we can pin teacher demonstrations
+    buffer = PriorReplayBuffer(args.buffer_size, device)
 
     num_features = 5 if args.handcrafted_features else args.num_features
     num_heads = 1 if args.handcrafted_features else args.num_heads
@@ -179,6 +229,90 @@ if __name__ == "__main__":
     )
     policy = DQNPolicy(qf)
     optimizer = torch.optim.Adam(qf.parameters(), lr=args.learning_rate, eps=1e-4)
+
+    # ------------------------------------------------------------------
+    # Demonstration collection and DQN pretraining on demos (Q-learning
+    # + large-margin classification + L2 regularization)
+    # ------------------------------------------------------------------
+    if args.demo:
+        if args.demo_ckpt and os.path.isfile(args.demo_ckpt):
+            ckpt = torch.load(args.demo_ckpt, map_location=device)
+            if "buffer_state_dict" in ckpt:
+                buffer.load_state_dict(ckpt["buffer_state_dict"])
+                print(f"Loaded {buffer.ptr} transitions from demo checkpoint into buffer.")
+        else:
+            obs_list, _ = env_demo.reset()
+            num_eps_demo = 0
+            print(f"Collecting {args.num_demos} demonstration episodes with teacher={args.teacher_method} ...")
+            while num_eps_demo < args.num_demos:
+                act_arr = []
+                for graph in obs_list:
+                    removals = teacher_wrapper(graph, args.teacher_method, max_steps=1)
+                    teacher_action = removals[0]
+                    act_arr.append(teacher_action)
+
+                obs_next_list, rew_arr, done_arr, info_list = env_demo.step(np.array(act_arr))
+
+                # Store as fixed teacher demonstrations
+                buffer.add(obs_list, act_arr, obs_next_list, rew_arr, done_arr, from_teacher=True, fixed=True)
+                num_eps_demo += len(info_list)
+
+                obs_next_list, _ = env_demo.reset_async(done_arr)
+                obs_list = obs_next_list
+
+            print(f"Saved {buffer.ptr} transitions from demonstrations in buffer.")
+
+        # ------------------- DQN Pretraining on D_demo -------------------
+        if args.pretrain:
+            qf.train()
+            print(f"Starting DQN pretraining on demonstrations for {args.pretrain_steps} steps ...")
+            for pre_step in range(args.pretrain_steps):
+                samples = buffer.sample(args.batch_size)
+                if samples is None:
+                    print("No demonstrations in buffer; stopping pretraining.")
+                    break
+
+                obs_b, act_b, obs_next_b, rew_b, done_b = samples
+
+                # 1) DQN TD loss J_DQN
+                with torch.no_grad():
+                    next_q = get_next_q(obs_next_b, qf, qf_target, args.algo)
+                    q_target_b = rew_b.flatten() + (1 - done_b.flatten()) * args.gamma * next_q
+
+                expert_act_nodes = act_b + obs_b.act_offsets
+                q_all = qf(obs_b)
+                q_pred_b = q_all.gather(0, expert_act_nodes).flatten()
+                td_loss = smooth_l1_loss(q_pred_b, q_target_b)
+
+                # 2) Large-margin classification loss J_E
+                # Margin l(a_E, a): 0 if a == a_E else margin_value
+                margin = torch.full_like(q_all, args.margin_value)
+                margin.index_fill_(0, expert_act_nodes, 0.0)
+                augmented_q = q_all + margin
+
+                # max_a (Q(s,a) + l) per graph
+                max_aug_q, _ = scatter_max(augmented_q, obs_b.batch_non_omni, dim_size=obs_b.batch_size)
+                q_expert = q_all.gather(0, expert_act_nodes)
+                margin_loss = (max_aug_q - q_expert).mean()
+
+                # 3) L2 regularization J_L2
+                l2_loss = sum(p.pow(2).sum() for p in qf.parameters() if p.requires_grad)
+
+                total_loss = td_loss + args.margin_coeff * margin_loss + args.l2_coeff * l2_loss
+
+                optimizer.zero_grad()
+                total_loss.backward()
+                if args.max_grad_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(qf.parameters(), args.max_grad_norm)
+                optimizer.step()
+
+                if pre_step % 100 == 0:
+                    print(f"[PRE] step {pre_step}/{args.pretrain_steps}, total loss={total_loss.item():.4f}")
+                    if args.use_tb:
+                        writer.add_scalar("pretrain/td_loss", td_loss.item(), pre_step)
+                        writer.add_scalar("pretrain/margin_loss", margin_loss.item(), pre_step)
+                        writer.add_scalar("pretrain/l2_loss", l2_loss.item(), pre_step)
+                        writer.add_scalar("pretrain/total_loss", total_loss.item(), pre_step)
 
     num_eps, num_updates = 0, 0
     auc_buffer = deque(maxlen=20)
@@ -196,6 +330,29 @@ if __name__ == "__main__":
             act_arr = act_arr.detach().cpu().numpy()
 
         obs_next_list, rew_arr, done_arr, info_list = env.step(act_arr)
+
+        # Optional reward shaping (R_total = R_env + β(t)*F)
+        if args.reward_shaping and args.teacher_method is not None:
+            decay_progress = min(global_step / args.shaping_decay_steps, 1.0)
+            beta_t = args.shaping_coeff * (1.0 - decay_progress)
+
+            if beta_t > 0.001:
+                rew_shaping = compute_reward_shaping(
+                    obs_list,
+                    act_arr,
+                    shaping_method=args.shaping_method,
+                    policy=policy,
+                    discriminator=None,
+                    teacher_method=args.teacher_method,
+                    temperature=1.0,
+                    device=device,
+                )
+                rew_arr = rew_arr + beta_t * rew_shaping
+
+                if args.use_tb and global_step % 100 == 0:
+                    writer.add_scalar("shaping/beta_coefficient", beta_t, global_step)
+                    writer.add_scalar(f"shaping/{args.shaping_method.lower()}_reward_avg", float(np.mean(rew_shaping)), global_step)
+
         buffer.add(obs_list, act_arr, obs_next_list, rew_arr, done_arr)
 
         obs_next_list, _ = env.reset_async(done_arr)

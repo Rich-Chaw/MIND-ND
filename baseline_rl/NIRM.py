@@ -9,10 +9,12 @@ import json
 import tempfile
 import pickle
 import os
+import time
 import sys
 
 # Path to NIRM project and its python_interface.py
-NIRM_ROOT = os.path.join("O:\\My_Codes\\GD2026\\NIRM")
+# NIRM_ROOT = os.path.join("O:\\My_Codes\\GD2026\\NIRM")
+NIRM_ROOT = os.path.join("/root/autodl-tmp/NIRM")
 NIRM_INTERFACE = os.path.join(NIRM_ROOT, "python_interface.py")
 
 # Python executable: use current interpreter so NIRM env is used when available
@@ -39,10 +41,11 @@ def NIRM_wrapper(graph: ig.Graph, model_path=None):
         with open(temp_graph_file, 'wb') as f:
             pickle.dump(graph, f)
 
-        cmd = [NIRM_PYTHON, NIRM_INTERFACE, "--graph_file", temp_graph_file, "--out_file", temp_out_file]
+        cmd = [NIRM_PYTHON, NIRM_INTERFACE, "--graph_file", temp_graph_file, "--out_file", temp_out_file, "--device", "cpu"]
         if model_path:
             cmd.extend(["--model_path", model_path])
 
+        start_time = time.time()
         result = subprocess.run(
             cmd,
             capture_output=True,
@@ -54,10 +57,11 @@ def NIRM_wrapper(graph: ig.Graph, model_path=None):
             with open(temp_out_file, 'r') as f:
                 output_data = json.load(f)
             removals = output_data['removals']
-            return removals
+            return removals, time.time() - start_time
         else:
             print(f"Error in NIRM_wrapper returncode: {result.stderr}", file=sys.stderr)
-            return None
+            return None, None
+
     except Exception as e:
         print(f"Error in NIRM_wrapper: {e}", file=sys.stderr)
         return None
@@ -73,14 +77,15 @@ if __name__ == "__main__":
     with open("../graphs/real/FINDER/Crime.pkl", 'rb') as f:
         graph = pickle.load(f)
 
-    removals = NIRM_wrapper(graph)
+    removals, runtime = NIRM_wrapper(graph)
+    print(f"NIRM runtime: {runtime}")
 
     sys.path.append("..")
     from baseline import evaluate_sol, evaluate_sol_networkx
-    start_time = time.time()
-    auc, robustness = evaluate_sol(graph, removals)
-    print(f"igraph Score: {robustness}, time: {time.time() - start_time}")
 
-    start_time = time.time()
+    auc, robustness = evaluate_sol(graph, removals)
+    print(f"igraph Score: {robustness}")
+
+
     robustness_networkx = evaluate_sol_networkx(graph, removals)
-    print(f"networkx Score: {robustness_networkx}, time: {time.time() - start_time}")
+    print(f"networkx Score: {robustness_networkx}")

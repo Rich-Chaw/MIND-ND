@@ -44,7 +44,10 @@ class GraphPool:
 
             n_init = g.vcount()
             g.vs["i_init"] = list(range(n_init))  # original node id
-            g['n_init'] = n_init;                 # original node count 
+            g['n_init'] = n_init;                 # original node count
+            # 2-core size of initial graph (for core reward shaping)
+            _coreness = g.coreness()
+            g['core2_init'] = sum(1 for k in _coreness if k >= 2)
             g['gcc_eps'] = [];                    # lcc list which remove, used for auc and robustness
             g['removals'] = []                    # removed nodes
             g['init'] = g.copy() if self.render == 'plot' else None
@@ -69,7 +72,10 @@ class GraphPool:
         g = g.copy()
         n_init = g.vcount()
         g.vs["i_init"] = list(range(n_init))
-        g['n_init'] = n_init; g['gcc_eps'] = []; g['removals'] = []
+        g['n_init'] = n_init
+        _coreness = g.coreness()
+        g['core2_init'] = sum(1 for k in _coreness if k >= 2)
+        g['gcc_eps'] = []; g['removals'] = []
         g['init'] = g.copy() if self.render == 'plot' else None
         if self.is_val:
             print(f"Loaded graph {g['name']}")

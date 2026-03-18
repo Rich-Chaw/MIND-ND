@@ -7,7 +7,22 @@ from utils import Batch, ig_to_data
 
 
 def teacher_wrapper(graph, teacher_method='spectral', max_steps=None):
-    from baseline import spectral_dismantling, adaptive_betweenness, adaptive_ci, adaptive_greedy_lcc, random_dismantling
+    from baseline import (
+        spectral_dismantling,
+        adaptive_betweenness,
+        adaptive_ci,
+        adaptive_greedy_lcc,
+        adaptive_degree,
+        adaptive_k_shell,
+        random_dismantling,
+    )
+    # Hybrid: randomly pick one of several simple heuristics
+    if teacher_method == 'Hybrid':
+        import random
+        # Degree, betweenness, k-shell (coreness)
+        choices = ['degree', 'betweenness', 'k-shell']
+        teacher_method = random.choice(choices)
+
     if teacher_method == 'spectral':
         try:
             removals = spectral_dismantling(graph, max_steps=max_steps)
@@ -15,6 +30,10 @@ def teacher_wrapper(graph, teacher_method='spectral', max_steps=None):
             removals = adaptive_betweenness(graph, max_steps=max_steps)
     elif teacher_method == 'betweenness':
         removals = adaptive_betweenness(graph, max_steps=max_steps)
+    elif teacher_method == 'degree':
+        removals = adaptive_degree(graph, max_steps=max_steps)
+    elif teacher_method == 'k-shell':
+        removals = adaptive_k_shell(graph, max_steps=max_steps)
     elif teacher_method == 'CI':
         removals = adaptive_ci(graph, max_steps=max_steps)
     elif teacher_method == 'greedy_lcc':
@@ -202,7 +221,7 @@ def compute_reward_shaping(obs_list, act_arr, shaping_method='betweenness', poli
     Args:
         obs_list: List of graph observations
         act_arr: Array of selected actions
-        shaping_method: 'betweenness' or 'KL'
+        shaping_method: 'betweenness', 'KL', or 'core'
         policy: Policy network (required for KL method)
         teacher_method: Teacher method for KL divergence ('spectral' or 'betweenness')
         temperature: Temperature for teacher probabilities
@@ -212,8 +231,37 @@ def compute_reward_shaping(obs_list, act_arr, shaping_method='betweenness', poli
         shaping_rewards: Array of shaping rewards
     """
     shaping_rewards = np.zeros(len(obs_list), dtype=np.float32)
-    
-    if shaping_method == 'betweenness':
+
+    def _core2_size(g):
+        """Size of 2-core: number of vertices with coreness >= 2."""
+        if g.vcount() == 0 or g.ecount() == 0:
+            return 0
+        coreness = g.coreness()
+        return sum(1 for k in coreness if k >= 2)
+
+    if shaping_method == 'core':
+        # Shaping reward = (Core_2(s) - Core_2(s')) / Core_2(s_0)
+        for i, graph in enumerate(obs_list):
+            if graph.vcount() <= 0 or graph.ecount() == 0:
+                shaping_rewards[i] = 0.0
+                continue
+            core2_s0 = graph.get('core2_init', graph['n_init'])
+            if core2_s0 <= 0:
+                shaping_rewards[i] = 0.0
+                continue
+            core2_s = _core2_size(graph)
+            # s' = graph after removing action node
+            g_next = graph.copy()
+            action_idx = int(act_arr[i])
+            if action_idx >= g_next.vcount():
+                shaping_rewards[i] = 0.0
+                continue
+            g_next.delete_vertices(action_idx)
+            core2_s_next = _core2_size(g_next)
+            shaping_rewards[i] = (core2_s - core2_s_next) / float(core2_s0)
+            del g_next
+
+    elif shaping_method == 'betweenness':
         # Betweenness centrality based reward shaping
         for i, graph in enumerate(obs_list):
             if graph.vcount() <= 2 or graph.ecount() == 0:

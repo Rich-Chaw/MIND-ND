@@ -35,7 +35,8 @@ class GCN(nn.Module):
             x = conv(x, g.edge_index)
             x_profile[:, k*self.num_features : (k+1)*self.num_features] = x
             x = F.relu(x)
-            
+            # L2 normalize after each layer (same as FINDER) for stable RL training
+            x = F.normalize(x, p=2, dim=-1)
         x_profile = self.graph_norm(x_profile, g.batch)
         return _read_out(x_profile, g)
 
@@ -49,7 +50,7 @@ class GraphSAGE(nn.Module):
 
         self.convs = nn.ModuleList()
         for _ in range(num_mps):
-            self.convs.append(SAGEConv(num_features, num_features))
+            self.convs.append(SAGEConv(num_features, num_features, aggr='add'))
             
         self.graph_norm = GraphNorm(num_features * num_mps, eps=1e-4)
 
@@ -60,6 +61,8 @@ class GraphSAGE(nn.Module):
             x = conv(x, g.edge_index)
             x_profile[:, k*self.num_features : (k+1)*self.num_features] = x
             x = F.relu(x)
+            # L2 normalize after each layer (same as FINDER GraphDQN_modules) for stable RL training
+            x = F.normalize(x, p=2, dim=-1)
         x_profile = self.graph_norm(x_profile, g.batch)
         return _read_out(x_profile, g)
 
@@ -86,5 +89,7 @@ class GAT(nn.Module):
             x = conv(x, g.edge_index)
             x_profile[:, k*self.num_features : (k+1)*self.num_features] = x
             x = F.relu(x)
+            # L2 normalize after each layer (same as FINDER) for stable RL training
+            x = F.normalize(x, p=2, dim=-1)
         x_profile = self.graph_norm(x_profile, g.batch)
         return _read_out(x_profile, g)

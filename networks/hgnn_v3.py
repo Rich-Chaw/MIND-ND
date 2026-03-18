@@ -74,6 +74,7 @@ class HGNN_V3(nn.Module):
             for l in range(num_mps)
         ])
         self.graph_norm = GraphNorm(self.num_features * num_mps, eps=1e-4)
+        self.register_buffer("x_init", torch.ones(1, num_features))
 
     def forward(self, g: Batch):
         '''
