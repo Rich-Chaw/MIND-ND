@@ -13,3 +13,4 @@ saved/*
 switched_graphs*
 __pycache__/
 baseline_dismantling_analysis*/
+*.xlsx
