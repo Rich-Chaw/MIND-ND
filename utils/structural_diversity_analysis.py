@@ -14,6 +14,7 @@ from collections import Counter
 import warnings
 import powerlaw
 warnings.filterwarnings('ignore')
+from utils.palette import MAIN_METHOD_COLOR, _OTHER_METHOD_PALETTE
 
 try:
     from sklearn.cluster import KMeans
@@ -69,7 +70,7 @@ def statistics(graph):
         df.loc[len(df)] = [N,E,AD,CC, r,Q]
         return df
 
-def analyze_powerlaw(graph, info=False):
+def analyze_powerlaw(graph, info=False, visualize=False):
     degrees = graph.degree()
     
     fit = powerlaw.Fit(degrees, discrete=True)
@@ -94,10 +95,12 @@ def analyze_powerlaw(graph, info=False):
             print("Result: Power-law distribution is NOT statistically significant.")
 
     # 5. Visualization
-
+    if visualize:
         plt.figure() 
-        fig = fit.plot_pdf(color='b', linewidth=2, label='Empirical Data')
-        fit.power_law.plot_pdf(color='r', linestyle='--', ax=fig, label='Power-law Fit')
+        empirical_color = MAIN_METHOD_COLOR
+        fit_color = _OTHER_METHOD_PALETTE[0]
+        fig = fit.plot_pdf(color=empirical_color, linewidth=2, label='Empirical Data')
+        fit.power_law.plot_pdf(color=fit_color, linestyle='--', ax=fig, label='Power-law Fit')
         plt.xlabel('Degree (k)')
         plt.ylabel('P(k)')
         plt.legend()
@@ -580,7 +583,6 @@ def main():
     print(compute_mahalanobis_similarity(df))
     print(compute_joint_mmd(df))
 
-    
     # # Visualize and summarize
     # create_scatter_plot(q_values, r_values, labels)
     # create_heatmap(q_values, r_values, labels)

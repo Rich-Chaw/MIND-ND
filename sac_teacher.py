@@ -30,7 +30,7 @@ class Args:
     """random seed"""
     device: str='cuda:0'
     """the device to use"""
-    gnn: str='hgnn_v5'
+    gnn: str='hgnn_v3'
     num_envs: int=64
     """number of parallel environments,default 64"""
     total_steps: int=50000
@@ -62,7 +62,7 @@ class Args:
     target_frequency: int=200
     """the frequency for updating the target networks, default 200"""
 
-    ckpt_pth: Optional[str]=None
+    ckpt_pth: Optional[str]='./saved/hgnn_v3/sac_teacher_degree_20260318_150529/24999.ckpt'
     """where ckeckpoint was saved"""
     
     reward_type: Optional[int] = 0
@@ -85,7 +85,7 @@ class Args:
         # 'graphs/demo/100_200_LFR_3000',
         # 'graphs/demo/100_200_LPA_Copy_ER_3000'
         # 'graphs/train/100_150_SBM_DCSBM_LPA_COPY_ER_6000'
-        'graphs/train/100_200_BA_1000'
+        'graphs/train/100_200_BA_5000'
     ])
     num_demos: int = 1000
     """Number of demonstrations to save"""
@@ -100,6 +100,7 @@ class Args:
     """Enable reward shaping"""
     shaping_method: str = 'KL'
     """Reward shaping method: 'betweenness' or 'KL'"""
+    shaping_decay: bool = False
     shaping_decay_steps: int = 10000
     """Number of steps to decay reward shaping coefficient"""
     shaping_coeff: float = 0.1
@@ -123,10 +124,10 @@ class Args:
 
     # dataset directories
     train_dir: List[str] = field(default_factory=lambda: [
-        'graphs/train/100_200_BA_5000',
-        'graphs/train/100_200_LFR_5000',
+        # 'graphs/train/100_200_BA_5000',
+        # 'graphs/train/100_200_LFR_5000',
         'graphs/train/100_200_LPA_Copy_ER_5000'
-        'graphs/train/100_150_SBM_DCSBM_LPA_COPY_ER_6000',
+        # 'graphs/train/100_150_SBM_DCSBM_LPA_COPY_ER_6000',
     ])
     valid_dir: List[str] = field(default_factory=lambda: [
         'graphs/valid/valid'
@@ -330,9 +331,11 @@ if __name__ == "__main__":
         # Apply reward shaping if enabled (following guide.md)
         if args.reward_shaping:
             # Compute decay factor: β(t) starts high and decays to 0
-            decay_progress = min(global_step / args.shaping_decay_steps, 1.0)
-            beta_t = args.shaping_coeff * (1.0 - decay_progress)
-            
+            if args.shaping_decay:
+                decay_progress = min(global_step / args.shaping_decay_steps, 1.0)
+                beta_t = args.shaping_coeff * (1.0 - decay_progress)
+            else:
+                beta_t = args.shaping_coeff
             if beta_t > 0.001:  # Only compute if coefficient is significant
                 # Compute reward shaping using specified method
                 rew_shaping = compute_reward_shaping(

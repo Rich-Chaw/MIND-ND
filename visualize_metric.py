@@ -79,10 +79,7 @@ def compute_relative_to_main(df, method_cols, main_col, baseline=100):
     return out, ordered
 
 
-# 非主列方法的固定配色：不含红/粉/品红，区分明显、不重复；主列单独用红色
-_OTHER_METHOD_PALETTE = [
-"#92A478", "#B3DE69", "#F7B6D2", "#ACE0CF", "#7EA1EF", "#F19F69", "#C195C4", "#FFD966", "#BAB4D8", "#C27BA0", "#76A5AF", "#7E6FB1", "#C9B458"
-]
+from utils.palette import _OTHER_METHOD_PALETTE, MAIN_METHOD_COLOR
 
 
 def _method_colors(method_cols, main_col=None):
@@ -91,7 +88,7 @@ def _method_colors(method_cols, main_col=None):
     idx = 0
     for m in method_cols:
         if main_col is not None and m == main_col:
-            out[m] = "#EA4252"
+            out[m] = MAIN_METHOD_COLOR
         else:
             out[m] = _OTHER_METHOD_PALETTE[idx % len(_OTHER_METHOD_PALETTE)]
             idx += 1

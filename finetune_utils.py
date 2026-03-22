@@ -245,7 +245,7 @@ def compute_reward_shaping(obs_list, act_arr, shaping_method='betweenness', poli
             if graph.vcount() <= 0 or graph.ecount() == 0:
                 shaping_rewards[i] = 0.0
                 continue
-            core2_s0 = graph.get('core2_init', graph['n_init'])
+            core2_s0 = graph['core2_init']
             if core2_s0 <= 0:
                 shaping_rewards[i] = 0.0
                 continue
