@@ -326,7 +326,7 @@ def validate_one_graph(graph, policy, save_res=None, step_ratio=None, log_remova
                 # obs_next_list, _ = env.reset_async(done_arr)
                 if len(info_list) > 0:
                     removals = info_list[0].removals
-                    auc = info_list[0].auc
+                    auc = info_list[0].auc/info_list[0].n_init
                     robustness = info_list[0].robustness
                     gcc_eps = info_list[0].gcc_eps
                     finished = True

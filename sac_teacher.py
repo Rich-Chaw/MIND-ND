@@ -8,7 +8,7 @@ import igraph as ig
 from typing import Optional, List
 from dataclasses import dataclass, field
 from collections import deque
-from torch_scatter import scatter_add
+from torch_scatter import scatter_add, scatter_max
 from datetime import datetime, timedelta
 from torch.nn.functional import mse_loss
 from torch.utils.tensorboard import SummaryWriter
@@ -94,6 +94,14 @@ class Args:
     """Use behavior cloning to train the policy (supervised on teacher demos)"""
     bc_steps: int = 10000
     """Number of gradient steps for behavior cloning when training from buffer"""
+    bc_supervise_q: bool = True
+    """If True, also train Q1/Q2 on demos (TD + large-margin + L2), aligned with dqn_teacher pretrain."""
+    bc_margin_value: float = 0.8
+    """Margin l for expert-action large-margin loss on Q during BC"""
+    bc_margin_coeff: float = 1.0
+    """Weight λ1 for large-margin Q loss during BC"""
+    bc_l2_coeff: float = 1e-5
+    """Weight λ2 for L2 regularization on Q1/Q2 during BC"""
 
     # Reward shaping settings
     reward_shaping: bool = False
@@ -248,49 +256,104 @@ if __name__ == "__main__":
             # log buffer size
             print(f"Saved {buffer.ptr} transitions from demonstration in buffer")
 
-            if args.bc:
-                print(f"Training behavior cloning for {args.bc_steps} steps using teacher demonstrations.")
-                bc_optimizer = torch.optim.Adam(
-                    [p for p in policy.parameters() if p.requires_grad],
-                    lr=args.learning_rate,
-                    eps=1e-4,
+        if args.bc:
+            print(f"Training behavior cloning for {args.bc_steps} steps using teacher demonstrations.")
+            bc_optimizer = torch.optim.Adam(
+                [p for p in policy.parameters() if p.requires_grad],
+                lr=args.learning_rate,
+                eps=1e-4,
+            )
+            bc_q_optimizer = None
+            if args.bc_supervise_q:
+                bc_q_optimizer = torch.optim.Adam(
+                     [p for p in list(qf1.parameters()) + list(qf2.parameters()) if p.requires_grad], 
+                    lr=args.learning_rate, 
+                    eps=1e-4)
+                print(
+                    f"BC also supervises Q networks."
                 )
 
-                for bc_step in range(args.bc_steps):
-                    # Sample transitions
-                    samples = buffer.sample(args.batch_size)
-                    if samples is None:
-                        print("No demonstrations in buffer; stopping behavior cloning.")
-                        break
+            for bc_step in range(args.bc_steps):
+                # Sample transitions
+                samples = buffer.sample(args.batch_size)
+                if samples is None:
+                    print("No demonstrations in buffer; stopping behavior cloning.")
+                    break
 
-                    obs_b, act_b, obs_next_b, rew_b, done_b = samples
+                obs_b, act_b, obs_next_b, rew_b, done_b = samples
 
-                    # Compute log-probabilities over actions from the policy
-                    _, logp_nodes = policy.get_action(obs_b, val=True)
+                # Compute log-probabilities over actions from the policy
+                _, logp_nodes = policy.get_action(obs_b, val=True)
 
-                    # Map per-graph action indices to node indices
-                    act_nodes = act_b + obs_b.act_offsets
-                    logp_selected = logp_nodes[act_nodes]
+                # Map per-graph action indices to node indices
+                act_nodes = act_b + obs_b.act_offsets
+                logp_selected = logp_nodes[act_nodes]
 
-                    bc_loss = -logp_selected.mean()
+                bc_loss = -logp_selected.mean()
 
-                    bc_optimizer.zero_grad()
-                    bc_loss.backward()
-                    bc_optimizer.step()
+                bc_optimizer.zero_grad()
+                bc_loss.backward()
+                bc_optimizer.step()
 
-                    if bc_step % 100 == 0:
-                        print(f"[BC] step {bc_step}/{args.bc_steps}, loss={bc_loss.item():.4f}")
-                        if args.use_tb:
-                            writer.add_scalar("bc/loss", bc_loss.item(), bc_step)
+                # ----- Q supervision on demos (same spirit as dqn_teacher pretrain) -----
+                if bc_q_optimizer is not None:
+                    alpha_bc = torch.tensor(args.alpha, device=device, dtype=torch.float32)
+                    with torch.no_grad():
+                        _, logp_next_b = policy.get_action(obs_next_b)
+                        qf1_next_b = qf1_target(obs_next_b)
+                        qf2_next_b = qf2_target(obs_next_b)
+                        qf_next_b = torch.min(qf1_next_b, qf2_next_b) - alpha_bc * logp_next_b
+                        b_next = obs_next_b.batch[obs_next_b.non_omni_mask]
+                        v_next_b = scatter_add(
+                            logp_next_b.exp() * qf_next_b, b_next, dim_size=obs_next_b.batch_size
+                        )
+                        q_target_b = rew_b.flatten() + (1 - done_b.flatten()) * args.gamma * v_next_b
 
-                # Save policy and buffer to demo_ckpt after BC so you can load both later
-                torch.save({
-                    "policy_state_dict": policy.state_dict(),
-                    "buffer_state_dict": buffer.get_state_dict(),
-                }, f"saved/demo/{args.gnn}/{args.teacher_method}_{time_string}.ckpt")
+                    q1_all = qf1(obs_b)
+                    q2_all = qf2(obs_b)
+                    q1_pred = q1_all.gather(0, act_nodes).flatten()
+                    q2_pred = q2_all.gather(0, act_nodes).flatten()
+                    td_loss = mse_loss(q1_pred, q_target_b) + mse_loss(q2_pred, q_target_b)
 
-                # Cleanup
-                del obs_b, act_b, obs_next_b, rew_b, done_b
+                    margin = torch.full_like(q1_all, args.bc_margin_value)
+                    margin.index_fill_(0, act_nodes, 0.0)
+                    aug1 = q1_all + margin
+                    aug2 = q2_all + margin
+                    max1, _ = scatter_max(aug1, obs_b.batch_non_omni, dim_size=obs_b.batch_size)
+                    max2, _ = scatter_max(aug2, obs_b.batch_non_omni, dim_size=obs_b.batch_size)
+                    q1_e = q1_all.gather(0, act_nodes)
+                    q2_e = q2_all.gather(0, act_nodes)
+                    margin_loss = (max1 - q1_e).mean() + (max2 - q2_e).mean()
+
+                    l2_q = sum(p.pow(2).sum() for p in qf1.parameters() if p.requires_grad) + sum(
+                        p.pow(2).sum() for p in qf2.parameters() if p.requires_grad
+                    )
+                    q_bc_loss = td_loss + args.bc_margin_coeff * margin_loss + args.bc_l2_coeff * l2_q
+
+                    bc_q_optimizer.zero_grad()
+                    q_bc_loss.backward()
+                    bc_q_optimizer.step()
+
+                if bc_step % 100 == 0:
+                    msg = f"[BC] step {bc_step}/{args.bc_steps}, policy_loss={bc_loss.item():.4f}"
+                    if bc_q_optimizer is not None:
+                        msg += f", q_loss={q_bc_loss.item():.4f} (td={td_loss.item():.4f}, margin={margin_loss.item():.4f})"
+                    print(msg)
+                    if args.use_tb:
+                        writer.add_scalar("bc/policy_loss", bc_loss.item(), bc_step)
+                        if bc_q_optimizer is not None:
+                            writer.add_scalar("bc/q_total_loss", q_bc_loss.item(), bc_step)
+                            writer.add_scalar("bc/q_td_loss", td_loss.item(), bc_step)
+                            writer.add_scalar("bc/q_margin_loss", margin_loss.item(), bc_step)
+
+            # Align target critics with online after BC (online Q was trained; targets were fixed for bootstrap)
+            if bc_q_optimizer is not None:
+                qf1_target.load_state_dict(qf1.state_dict())
+                qf2_target.load_state_dict(qf2.state_dict())
+                print("qf1_target / qf2_target synchronized with qf1 / qf2 after BC.")
+                
+            # Cleanup
+            del obs_b, act_b, obs_next_b, rew_b, done_b
     
     # Setup optimizers with appropriate learning rates
     lr = args.learning_rate

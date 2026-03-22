@@ -4,7 +4,7 @@ import igraph as ig
 import networkx as nx
 from scipy.sparse.linalg import eigsh
 from copy import deepcopy
-from typing import Callable, Dict
+from typing import Callable, Dict, List, Tuple
 import os
 import time
 import gc
@@ -368,7 +368,7 @@ def evaluate_sol(graph, removals, threshold=None):
         # lambda_max = _largest_eigenvalue(temp_G)
         # lambda_max_list.append(lambda_max)
 
-    auc = simpson(lcc_sizes[1:], dx=1) if lcc_sizes else 0.0
+    auc = simpson(lcc_sizes[1:], dx=1)/ n_init if lcc_sizes else 0.0
     robustness = sum(lcc_sizes[::-1][:-2]) / n_init if lcc_sizes else 0.0
     return auc, robustness, lcc_sizes, removed_sizes
 
@@ -665,6 +665,41 @@ def baseline_dismantling(graph, methods, max_steps=None, threshold=0.1,visualize
         visualize_multiple_curve(graph,methods_results)
 
     return methods_results
+
+
+def baseline_dismantling_batch(
+    graph_list: List[ig.Graph],
+    batch_size: int=None,
+    method: str = "Degree",
+    max_steps=None,
+    threshold=0.1,
+) -> Tuple[List[float], List[float], List[List[int]]]:
+    """
+    对多张图批量运行同一基线拆解方法，接口与 test.mind_dismantling_batch 的返回值形式一致：
+    返回每张图对应的 auc、鲁棒性、移除序列列表。
+
+    batch_size 仅用于按块遍历 graph_list（与 DismantleEnv 的 batch 语义对齐）；基线启发式本身仍逐图计算。
+    """
+    if method not in METHODS:
+        raise KeyError(f"Unknown baseline method {method!r}; valid keys: {sorted(METHODS)}")
+    func = METHODS[method]
+    auc_list: List[float] = []
+    robustness_list: List[float] = []
+    removals_list: List[List[int]] = []
+
+    for g in graph_list:
+        g = deepcopy(g)
+        ensure_attribute(g)
+        removals, _ = func(g, max_steps=max_steps, threshold=threshold)
+        auc, r, _, _ = evaluate_sol(g, removals, threshold=threshold)
+        auc_list.append(auc)
+        robustness_list.append(r)
+        removals_list.append(removals)
+
+    print("Avg AUC:", np.mean(auc_list))
+    print("Avg Robustness:", np.mean(robustness_list))
+    return auc_list, robustness_list, removals_list
+
 
 #-----------------------------------------------------------------
 # Import FINDER methods

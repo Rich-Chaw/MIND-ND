@@ -193,8 +193,22 @@ class DQNPolicy(torch.nn.Module):
             return act, q_vals
         return greedy_act, q_vals
 
-# ========== Task-Adaptive Networks with Shared Hypernetwork ==========
+def load_dismantler(ckpt_pth=None,device=torch.device('cpu')):
+    # defalut value when no args.config
+    # device: str='cuda:0'
+    F = 16; H = 4; K = 6
+    gnn = 'mind'
+    
+    if 'sac' in ckpt_pth:
+        policy, _, _, _, _ = load_sac_dismantler(F, H, K, gnn, device, ckpt_pth)
+    else:
+        qf, _ = load_dqn_dismantler(F, H, K, gnn, device, ckpt_pth)
+        policy = DQNPolicy(qf)
+        
+    return policy
 
+
+# ========== Task-Adaptive Networks with Shared Hypernetwork ==========
 
 class SACPolicyWithHypernetwork(nn.Module):
     """

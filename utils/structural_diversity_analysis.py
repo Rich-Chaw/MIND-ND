@@ -123,7 +123,7 @@ def calculate_properties(graphs):
                 graph = item
                 topology = graph["config"]["topology"] if "config" in graph.attributes() else "unknown"
 
-            source = graph["source"]
+            source = graph["source"] if "source" in graph.attributes() else "unknown"
 
             if graph.vcount() < 10:
                 continue

@@ -18,7 +18,7 @@ def generate(topology,nrange = "100_200",num=10,is_rewiring=False):
     
     while idx < num:
         N = np.random.randint(n_min,n_max+1)
-        if topology in ['Ring','BA','Copy','LPA','ER','HK','PLC','BTER','NPSO']:
+        if topology in ['Ring','BA','Copy','LPA','ER','HK','PLC','BTER','NPSO','WS']:
             m = int(np.random.choice([1, 2, 3, 4, 5, 6, 8, 10],
                                     p=[1/12, 2/12, 2/12, 2/12, 2/12, 1/12, 1/12, 1/12]))
         if topology in ['SBM','DCSBM','Barbell','StarCom','RingCom']:
@@ -183,7 +183,8 @@ if __name__ == "__main__":
     # topologies = ['FF']
     # topologies = ['BTER']
     # topologies = ['NPSO']
-    topologies = ['BA']
+    # topologies = ['BA']
+    topologies = ['WS']
     # ['SBM','DCSBM','LPA','Copy','ER']
 
     dataset_name = f"{args.nrange}"
@@ -243,8 +244,8 @@ if __name__ == "__main__":
         create_scatter_plot
     )
     df = calculate_properties(graphs)
-    print(len(df))
+    print(df)
     create_scatter_plot(df["Q"].values, df["r"].values, df["label"].values, os.path.join(save_dir, "diversity_scatter.png"))
-    create_scatter_plot(df["Q"].values, df["clustering"].values, df["label"].values, os.path.join(save_dir, "diversity_scatter_QC.png"))
+    create_scatter_plot(df["Q"].values, df["Clustering"].values, df["label"].values, os.path.join(save_dir, "diversity_scatter_QC.png"))
     # with open(f'{dataset_name}.pkl', 'wb') as out_f:
     #     pickle.dump(net_dict, out_f)

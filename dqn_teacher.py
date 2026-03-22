@@ -96,6 +96,7 @@ class Args:
     reward_shaping: bool = False
     """Enable reward shaping"""
     shaping_method: str = "KL"
+    shaping_decay: bool = False
     """Reward shaping method: 'betweenness' or 'KL'"""
     shaping_decay_steps: int = 10000
     """Number of steps to decay reward shaping coefficient"""
@@ -313,6 +314,12 @@ if __name__ == "__main__":
                         writer.add_scalar("pretrain/margin_loss", margin_loss.item(), pre_step)
                         writer.add_scalar("pretrain/l2_loss", l2_loss.item(), pre_step)
                         writer.add_scalar("pretrain/total_loss", total_loss.item(), pre_step)
+            
+            qf_target.load_state_dict(qf.state_dict())
+            print("qf_target synchronized with qf after pretraining.")
+
+            # Cleanup
+            del obs_b, act_b, obs_next_b, rew_b, done_b
 
     num_eps, num_updates = 0, 0
     auc_buffer = deque(maxlen=20)
@@ -320,7 +327,7 @@ if __name__ == "__main__":
 
     obs_list, _ = env.reset()
     for global_step in range(args.total_steps):
-        if global_step < args.learning_starts and args.ckpt_pth is None:
+        if global_step < args.learning_starts and args.ckpt_pth is None and not args.pretrain:
             act_arr = env.sample_act()
             epsilon = args.eps_start
         else:
@@ -334,8 +341,10 @@ if __name__ == "__main__":
         # Optional reward shaping (R_total = R_env + β(t)*F)
         if args.reward_shaping and args.teacher_method is not None:
             decay_progress = min(global_step / args.shaping_decay_steps, 1.0)
-            beta_t = args.shaping_coeff * (1.0 - decay_progress)
-
+            if args.shaping_decay:
+                beta_t = args.shaping_coeff * (1.0 - decay_progress)
+            else:
+                beta_t = args.shaping_coeff
             if beta_t > 0.001:
                 rew_shaping = compute_reward_shaping(
                     obs_list,
