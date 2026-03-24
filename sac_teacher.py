@@ -86,7 +86,8 @@ class Args:
         # 'graphs/demo/100_200_LFR_3000',
         # 'graphs/demo/100_200_LPA_Copy_ER_3000'
         # 'graphs/train/100_150_SBM_DCSBM_LPA_COPY_ER_6000'
-        'graphs/train/100_200_BA_5000'
+        # 'graphs/train/100_200_BA_5000'
+        'graphs/train/100_200_DCSBM_5000'
     ])
     num_demos: int = 1000
     """Number of demonstrations to save"""
@@ -134,7 +135,8 @@ class Args:
     train_dir: List[str] = field(default_factory=lambda: [
         # 'graphs/train/100_200_BA_5000',
         # 'graphs/train/100_200_LFR_5000',
-        'graphs/train/100_200_LPA_Copy_ER_5000'
+        # 'graphs/train/100_200_LPA_Copy_ER_5000'
+        'graphs/train/100_200_DCSBM_5000'
         # 'graphs/train/100_150_SBM_DCSBM_LPA_COPY_ER_6000',
     ])
     valid_dir: List[str] = field(default_factory=lambda: [

@@ -90,8 +90,8 @@ def generate(topology,nrange = "100_200",num=10,is_rewiring=False):
             config = {'N':N,'p_in':p_in,'p_out':p_out,'blocks':num_blocks}
         elif topology == 'DCSBM':
             num_blocks = np.random.randint(2,5)
-            p_in = np.random.uniform(0.1,0.15)
-            p_out = np.random.uniform(0.001,0.006)
+            p_in = np.random.uniform(0.05,0.15)
+            p_out = np.random.uniform(0.001,0.005)
             g = DCSBM(N,p_in,p_out,num_blocks)
             config = {'N':N,'p_in':p_in,'p_out':p_out,'blocks':num_blocks}
         elif topology == 'LFR':
@@ -184,7 +184,7 @@ if __name__ == "__main__":
     # topologies = ['BTER']
     # topologies = ['NPSO']
     # topologies = ['BA']
-    topologies = ['WS']
+    topologies = ['DCSBM']
     # ['SBM','DCSBM','LPA','Copy','ER']
 
     dataset_name = f"{args.nrange}"
