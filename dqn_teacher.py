@@ -89,8 +89,6 @@ class Args:
     ])
     num_demos: int = 1000
     """Number of demonstration episodes to collect"""
-    demo_ckpt: Optional[str] = None
-    """Optional checkpoint that contains a saved teacher buffer state_dict"""
 
     # Reward shaping settings
     reward_shaping: bool = False
@@ -236,8 +234,8 @@ if __name__ == "__main__":
     # + large-margin classification + L2 regularization)
     # ------------------------------------------------------------------
     if args.demo:
-        if args.demo_ckpt and os.path.isfile(args.demo_ckpt):
-            ckpt = torch.load(args.demo_ckpt, map_location=device)
+        if args.ckpt_pth:
+            ckpt = torch.load(args.ckpt_pth, map_location=device)
             if "buffer_state_dict" in ckpt:
                 buffer.load_state_dict(ckpt["buffer_state_dict"])
                 print(f"Loaded {buffer.ptr} transitions from demo checkpoint into buffer.")
@@ -317,6 +315,18 @@ if __name__ == "__main__":
             
             qf_target.load_state_dict(qf.state_dict())
             print("qf_target synchronized with qf after pretraining.")
+
+            directory = os.path.join('saved', run_path)
+            if not os.path.exists(directory):
+                os.makedirs(directory)
+            torch.save({
+                    "buffer_state_dict": buffer.get_state_dict(),
+                    "qf_state_dict": qf.state_dict(),
+                    "qf_target_state_dict": qf_target.state_dict()
+                },
+                os.path.join(directory, "pre.ckpt"),
+            )
+            print(f"Saved behavior cloning checkpoint to {os.path.join(directory, 'pre.ckpt')}")
 
             # Cleanup
             del obs_b, act_b, obs_next_b, rew_b, done_b

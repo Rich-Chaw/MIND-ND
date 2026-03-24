@@ -62,7 +62,8 @@ class Args:
     target_frequency: int=200
     """the frequency for updating the target networks, default 200"""
 
-    ckpt_pth: Optional[str]='./saved/hgnn_v3/sac_teacher_degree_20260318_150529/24999.ckpt'
+    # ckpt_pth: Optional[str]='./saved/hgnn_v3/sac_teacher_degree_20260318_150529/24999.ckpt'
+    ckpt_pth: Optional[str]=None
     """where ckeckpoint was saved"""
     
     reward_type: Optional[int] = 0
@@ -89,7 +90,6 @@ class Args:
     ])
     num_demos: int = 1000
     """Number of demonstrations to save"""
-    demo_ckpt: Optional[str] = None
     bc: bool = False
     """Use behavior cloning to train the policy (supervised on teacher demos)"""
     bc_steps: int = 10000
@@ -147,8 +147,8 @@ def create_run_path_and_save_args(args):
     now = datetime.now()
     time_string = now.strftime("%Y%m%d_%H%M%S")
     run_path = f"{args.gnn}/sac_teacher"
-    if args.teacher_method:
-        run_path += f"_{args.teacher_method}"
+    # if args.teacher_method:
+    #     run_path += f"_{args.teacher_method}"
     if args.priority_type:
         run_path += f"_{args.priority_type}"
     run_path += f"_{time_string}"
@@ -222,11 +222,8 @@ if __name__ == "__main__":
     print(f"Priority sampling: {args.priority_type}")
      
     if args.demo:
-        if args.demo_ckpt and os.path.isfile(args.demo_ckpt):
-            ckpt = torch.load(args.demo_ckpt, map_location=device)
-            if "policy_state_dict" in ckpt:
-                policy.load_state_dict(ckpt["policy_state_dict"])
-                print(f"Loaded behavior cloning checkpoint: {args.demo_ckpt}")
+        if args.ckpt_pth:
+            ckpt = torch.load(args.ckpt_pth, map_location=device)
             if "buffer_state_dict" in ckpt:
                 buffer.load_state_dict(ckpt["buffer_state_dict"])
                 print(f"Loaded {buffer.ptr} transitions from checkpoint in buffer.")
@@ -351,7 +348,22 @@ if __name__ == "__main__":
                 qf1_target.load_state_dict(qf1.state_dict())
                 qf2_target.load_state_dict(qf2.state_dict())
                 print("qf1_target / qf2_target synchronized with qf1 / qf2 after BC.")
-                
+
+            directory = os.path.join('saved', run_path)
+            if not os.path.exists(directory):
+                os.makedirs(directory)
+            torch.save({
+                    "buffer_state_dict": buffer.get_state_dict(),
+                    "policy_state_dict": policy.state_dict(),
+                    "qf1_state_dict": qf1.state_dict(),
+                    "qf2_state_dict": qf2.state_dict(),
+                    "qf1_target_state_dict": qf1_target.state_dict(),
+                    "qf2_target_state_dict": qf2_target.state_dict(),
+                },
+                os.path.join(directory, "bc.ckpt"),
+            )
+            print(f"Saved behavior cloning checkpoint to {os.path.join(directory, 'bc.ckpt')}")
+
             # Cleanup
             del obs_b, act_b, obs_next_b, rew_b, done_b
     
@@ -382,7 +394,7 @@ if __name__ == "__main__":
     for global_step in range(args.total_steps): # args.num_envs transitions at each global step
         
         #### DISMANTLE ####
-        if global_step<args.learning_starts and args.ckpt_pth==None:
+        if global_step<args.learning_starts and args.ckpt_pth==None and not args.bc:
             act_arr = env.sample_act()
         else:
             with torch.no_grad():
