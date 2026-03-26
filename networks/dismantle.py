@@ -9,18 +9,18 @@ from .gnn_interface import GNN_ENCODER
 from .hypernetwork import Hypernetwork, FiLMGenerator
 
 
-def load_sac_dismantler(F=16, H=3, K=6, gnn=None, device=None, ckpt_pth=None, positional_encoding=None, handcrafted_features=False):
+def load_sac_dismantler(F=16, H=4, K=6, gnn=None, device=None, ckpt_pth=None, positional_encoding=None, handcrafted_features=False):
     if ckpt_pth != None:
         config_dir = os.path.dirname(ckpt_pth)
         if os.path.exists(os.path.join(config_dir, 'args.json')):
             with open(os.path.join(config_dir, 'args.json')) as f:
                 args = json.load(f)
-        F = args['num_features']
-        H = args['num_heads']
-        K = args['num_mps']
-        gnn = args['gnn']
-        positional_encoding = args['positional_encoding']
-        handcrafted_features = args['handcrafted_features']
+            F = args['num_features']
+            H = args['num_heads']
+            K = args['num_mps']
+            gnn = args['gnn']
+            positional_encoding = args['positional_encoding']
+            handcrafted_features = args['handcrafted_features']
     
     policy = SACPolicy(F, H, K, gnn, positional_encoding, handcrafted_features).to(device)
     qf1 = SACQNetwork(F, H, K, gnn, positional_encoding, handcrafted_features).to(device)
@@ -199,11 +199,12 @@ def load_dismantler(ckpt_pth=None,device=torch.device('cpu')):
     F = 16; H = 4; K = 6
     gnn = 'mind'
     
-    if 'sac' in ckpt_pth:
-        policy, _, _, _, _ = load_sac_dismantler(F, H, K, gnn, device, ckpt_pth)
-    else:
+
+    if 'dqn' in ckpt_pth:
         qf, _ = load_dqn_dismantler(F, H, K, gnn, device, ckpt_pth)
         policy = DQNPolicy(qf)
+    else:
+        policy, _, _, _, _ = load_sac_dismantler(F, H, K, gnn, device, ckpt_pth)
         
     return policy
 

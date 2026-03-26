@@ -169,6 +169,7 @@ def visualize_multiple_curve(graph, methods_results,main_method=None,step_ratio 
     
     plt.figure(figsize=(12, 8))
     n_init = graph.vcount()
+    max_fraction_removed = 0.0
     # colors = ['blue', 'green', 'orange', 'purple']
     # colors = plt.cm.tab20(np.linspace(0, 2, 30))
     colors = [
@@ -180,6 +181,8 @@ def visualize_multiple_curve(graph, methods_results,main_method=None,step_ratio 
         lcc_sizes = result['lcc_sizes']
         removed_sizes = result['removed_sizes']
         # lambda_list = result['lambda_list']
+        if n_init > 0:
+            max_fraction_removed = max(max_fraction_removed, len(removed_sizes) / n_init)
         
         x = np.array(removed_sizes)
         y = np.array(lcc_sizes)
@@ -198,7 +201,7 @@ def visualize_multiple_curve(graph, methods_results,main_method=None,step_ratio 
     plt.title('Dismantling Methods Comparison', fontsize=14)
     plt.legend(fontsize=10)
     plt.grid(True, alpha=0.3)
-    plt.xlim(0, 1)
+    plt.xlim(0.0, max_fraction_removed if max_fraction_removed > 0 else 1.0)
     plt.ylim(0, 1)
     
     # Save plot

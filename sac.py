@@ -79,8 +79,9 @@ class Args:
     # dataset directories
     train_dir: List[str] = field(default_factory=lambda: [
         # 'graphs/train/100_200_LFR_5000',
-        'graphs/train/100_200_BA_5000',
+        # 'graphs/train/100_200_BA_5000',
         # 'graphs/train/100_200_LPA_Copy_ER_5000',
+        'graphs/train/100_150_SBM_DCSBM_LPA_COPY_ER_6000',
         # 'graphs/train/100_200_BTER_2500',
         # 'graphs/train/100_200_FF_2500_rewire',
         # 'graphs/train/100_200_LPA_Copy_ER_FF_10000'

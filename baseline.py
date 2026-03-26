@@ -328,7 +328,7 @@ def evaluate_sol(graph, removals, threshold=None):
     - lambda_max_list: 随拆除比例变化的最大邻接矩阵特征值列表
     - removed_sizes: 对应每一步的节点移除比例列表
     """
-    if len(removals) == 0:
+    if not removals or len(removals) == 0:
         print("empty removal when evaluate sol")
         return 0.0, 0.0, [], [], []
 
