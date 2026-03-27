@@ -638,17 +638,40 @@ def _wrap_with_runtime(func):
     return wrapped
 
 
+def _get_removals_path(graph, method_name, threshold):
+    graph_name = graph["name"] if "name" in graph.attributes() else "unnamed_graph"
+    graph_name = str(graph_name).replace(os.sep, "_")
+    method_name = str(method_name).replace(" ", "_")
+    threshold_str = "None" if threshold is None else str(threshold).replace("/", "_")
+    base_dir = os.path.join(os.path.dirname(__file__), "results", graph_name)
+    return os.path.join(base_dir, f"{method_name}_{threshold_str}.txt")
+
+
 # Public METHODS dict: functions must return (removals, runtime) for baseline_dismantling
 METHODS = {name: _wrap_with_runtime(f) for name, f in BASE_METHODS.items()}
 
-def baseline_dismantling(graph, methods, max_steps=None, threshold=0.1,visualize=False):
+def baseline_dismantling(graph, methods, max_steps=None, threshold=0.1, visualize=False, save_removals=False):
     ensure_attribute(graph)
     methods_results = {}
     for name, func in methods.items():
-        # Get the sequence of nodes to remove
-        removals, runtime = func(graph,max_steps=max_steps, threshold=threshold)
+        cache_path = _get_removals_path(graph, name, threshold) if save_removals else None
 
-        auc, r, lcc_sizes, removed_sizes = evaluate_sol(graph,removals,threshold=threshold)
+        if save_removals and os.path.exists(cache_path):
+            with open(cache_path, "r", encoding="utf-8") as f:
+                removals = [int(line.strip()) for line in f if line.strip()]
+            runtime = 0.0
+            print(f"method {name}: loaded cached removals from {cache_path}")
+        else:
+            # Get the sequence of nodes to remove
+            removals, runtime = func(graph, max_steps=max_steps, threshold=threshold)
+            if save_removals:
+                os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                with open(cache_path, "w", encoding="utf-8") as f:
+                    f.write("\n".join(str(int(node_id)) for node_id in removals))
+                    if removals:
+                        f.write("\n")
+
+        auc, r, lcc_sizes, removed_sizes = evaluate_sol(graph, removals, threshold=threshold)
         print(f"method {name}: AUC={auc:.6f}, Robustness={r:.6f}, runtime={runtime:.6f}")
 
         methods_results[name] = {

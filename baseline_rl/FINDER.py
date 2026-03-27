@@ -7,15 +7,30 @@ import tempfile
 import pickle
 import os
 import time
+import sys
 
 # Path to NIRM project and its python_interface.py
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 FINDER_ROOT = os.path.normpath(os.path.join(_SCRIPT_DIR, "..", "..", "FINDER"))
 FINDER_INTERFACE = os.path.join(FINDER_ROOT, "python_interface.py")
 
-# Python executable: use current interpreter so NIRM env is used when available
+# Python executable preference:
+# 1) env var FINDER_PYTHON (if provided)
+# 2) hard-coded tf_py37 path
+# 3) current interpreter (sys.executable) as fallback
 # FINDER_PYTHON = os.path.join("D:\\Anaconda3\\envs\\tf_py37\\python.exe")
-FINDER_PYTHON = os.path.join("/autodl-tmp/miniconda3/envs/tf_py37/bin/python")
+FINDER_PYTHON = "~/autodl-tmp/miniconda3/envs/tf_py37/bin/python"
+
+
+def _resolve_finder_python() -> str:
+    candidate = os.environ.get("FINDER_PYTHON", FINDER_PYTHON)
+    candidate = os.path.abspath(os.path.expanduser(candidate))
+    if os.path.exists(candidate):
+        return candidate
+    return sys.executable
+
+
+FINDER_PYTHON = _resolve_finder_python()
 
 def FINDER_wrapper(graph:ig.Graph):
     """
