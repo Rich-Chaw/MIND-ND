@@ -168,7 +168,7 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num_train_graphs", type=int, default=1000, help="Training graphs per class (SBM + LPA)")
     parser.add_argument("--num_test_graphs", type=int, default=200, help="Test graphs per class")
-    parser.add_argument("--gnn", type=str, default="hgnn_v3", choices=list(GNN_ENCODER.keys()))
+    parser.add_argument("--gnn", type=str, default="rfgnn", choices=list(GNN_ENCODER.keys()))
     parser.add_argument("--num_features", type=int, default=16)
     parser.add_argument("--num_heads", type=int, default=4)
     parser.add_argument("--num_mps", type=int, default=6)

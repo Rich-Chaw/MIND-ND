@@ -4,7 +4,18 @@ from matplotlib.patches import Circle
 import numpy as np
 import igraph as ig
 from copy import deepcopy
+from utils.palette import _BASELINE_METHOD_PALETTE, _OUR_METHOD_PALETTE,MAIN_METHOD_COLOR
 import os
+
+config = {
+"font.family": ["Times New Roman", "SimSun"],
+"font.size": 16,
+# "font.serif": ['SimSun'], # 中文宋体
+"font.serif": ['SimHei'], # 中文宋体
+}
+plt.rcParams.update(config)
+plt.rcParams["axes.unicode_minus"] = False  # 用 ASCII 减号，避免负号也变成方块
+
 
 def ensure_static_id(graph):
     """Ensure graph has static_id attribute"""
@@ -172,9 +183,7 @@ def visualize_multiple_curve(graph, methods_results,main_method=None,step_ratio 
     max_fraction_removed = 0.0
     # colors = ['blue', 'green', 'orange', 'purple']
     # colors = plt.cm.tab20(np.linspace(0, 2, 30))
-    colors = [
-    "#92A478", "#B3DE69", "#F7B6D2", "#ACE0CF", "#7EA1EF", "#F19F69", "#C195C4", "#FFD966", "#BAB4D8", "#C27BA0", "#76A5AF", "#7E6FB1", "#C9B458"
-    ]
+
     
     for i, (method_name, result) in enumerate(methods_results.items()):
         removals = result['removals']
@@ -190,16 +199,19 @@ def visualize_multiple_curve(graph, methods_results,main_method=None,step_ratio 
         # lcc_sizes,removed_sizes = get_curve_list(graph,removals,step_ratio)
         
         if main_method is not None and method_name == main_method:
-            color = "#EA4252"
+            color = MAIN_METHOD_COLOR
         else:
-            color = colors[i]
+            if method_name in _BASELINE_METHOD_PALETTE:
+                color = _BASELINE_METHOD_PALETTE[method_name]
+            else:
+                color = _OUR_METHOD_PALETTE[i % len(_OUR_METHOD_PALETTE)]
         plt.plot(x, y, color=color, linewidth=2,linestyle= '--',
-                marker='o', markersize=3, label=method_name, alpha=0.8)
+                marker='o', markersize=3, label=f"{method_name}  AUC={result['auc']:.4f}  Steps={len(removed_sizes)}", alpha=0.8)
     
-    plt.xlabel('Fraction of Nodes Removed', fontsize=12)
-    plt.ylabel('Normalized LCC Size', fontsize=12)
-    plt.title('Dismantling Methods Comparison', fontsize=14)
-    plt.legend(fontsize=10)
+    plt.xlabel('Removed Ratio', fontsize=20)
+    plt.ylabel('Normalized LCC Size', fontsize=20)
+    # plt.title('Dismantling Methods Comparison', fontsize=14)
+    plt.legend(fontsize=16)
     plt.grid(True, alpha=0.3)
     plt.xlim(0.0, max_fraction_removed if max_fraction_removed > 0 else 1.0)
     plt.ylim(0, 1)

@@ -3,40 +3,52 @@ import pickle
 from typing import Optional
 
 import matplotlib.pyplot as plt
+from matplotlib.ticker import LogFormatterMathtext, LogLocator, NullFormatter
 
 config = {
-"font.family": ["Times New Roman", "SimSun"],
-"font.size": 14,
-"font.serif": ['SimSun'], # 中文宋体
+"font.family": ["Times New Roman", "SimHei"],
+"font.size": 20,
+"font.serif": ['SimHei'], # 中文黑体
 }
 plt.rcParams.update(config)
 plt.rcParams["axes.unicode_minus"] = False  # 用 ASCII 减号，避免负号也变成方块
 
 import powerlaw
 
-from utils.palette import MAIN_METHOD_COLOR, _OTHER_METHOD_PALETTE
+from utils.palette import MAIN_METHOD_COLOR, PALETTE2
 from utils.common import load_g
 
 DATA_PATHS = [
-    "graphs/real/bio/foodweb-baywet",
-    "graphs/real/bio/maayan-foodweb",
+    # "graphs/real/bio/foodweb-baywet",
+    # "graphs/real/bio/maayan-foodweb",
     # "graphs/real/bio/arenas-meta",
-    "graphs/real/bio/maayan-vidal",
-    "graphs/real/social/petster-hamster",
-    "graphs/real/social/ego-twitter",
+    # "graphs/real/bio/maayan-vidal",
+    # "graphs/real/social/petster-hamster",
+    # "graphs/real/social/ego-twitter",
     # "graphs/real/social/loc-brightkite",
-    "graphs/real/social/loc-gowalla",
-    "graphs/real/information/web-EPA",
-    "graphs/real/information/subelj_jdk_jdk",
+    # "graphs/real/social/loc-gowalla",
+    # "graphs/real/information/web-EPA",
+    # "graphs/real/information/subelj_jdk_jdk",
     # "graphs/real/information/linux",
-    "graphs/real/information/p2p-Gnutella31",
-    "graphs/real/tech/eu-powergrid",
+    # "graphs/real/information/p2p-Gnutella31",
+    # "graphs/real/tech/eu-powergrid",
     # "graphs/real/tech/gridkit-eupowergrid",
-    "graphs/real/tech/gridkit-north_america",
-    "graphs/real/tech/internet-topology",
+    # "graphs/real/tech/gridkit-north_america",
+    # "graphs/real/tech/internet-topology",
+    "graphs/example/econ-wm1",
+    "graphs/example/eu-powergrid",
+    "graphs/example/moreno_propro",
+    "graphs/example/openflights-airport",
+    "graphs/example/ego-facebook",
+    "graphs/example/subelj_jdk_jdk",
+    "graphs/example/dblp-cite",
+    "graphs/example/linux",
+    "graphs/example/slashdot",
+
 ]
 
-ROW_ORDER = ["bio", "social", "information", "tech"]
+NROWS = 3
+NCOLS = 3
 
 
 def _resolve_graph_path(base_path: str) -> Optional[str]:
@@ -47,38 +59,25 @@ def _resolve_graph_path(base_path: str) -> Optional[str]:
     return None
 
 
-def plot_powerlaw_grid(data_paths=DATA_PATHS, save_path="powerlaw_real_16.png"):
-    grouped = {k: [] for k in ROW_ORDER}
-    for p in data_paths:
-        parts = p.replace("\\", "/").split("/")
-        if len(parts) < 4:
-            continue
-        group_name = parts[-2]
-        if group_name in grouped:
-            grouped[group_name].append(p)
-
-    nrows = len(ROW_ORDER)
-    ncols = max(len(grouped[g]) for g in ROW_ORDER)
+def plot_powerlaw_grid(data_paths=DATA_PATHS, save_path="powerlaw_3x3.png"):
+    nrows, ncols = NROWS, NCOLS
     fig, axes = plt.subplots(nrows, ncols, figsize=(4.2 * ncols, 3.6 * nrows))
 
-    if nrows == 1:
-        axes = [axes]
-
     empirical_color = MAIN_METHOD_COLOR
-    fit_color = _OTHER_METHOD_PALETTE[0]
+    fit_color = PALETTE2[0]
 
-    for r, group in enumerate(ROW_ORDER):
-        row_paths = grouped[group]
+    for r in range(nrows):
         for c in range(ncols):
-            ax = axes[r][c] if nrows > 1 else axes[c]
-            if c >= len(row_paths):
+            ax = axes[r][c]
+            idx = r * ncols + c
+            if idx >= len(data_paths):
                 ax.axis("off")
                 continue
 
-            raw_path = row_paths[c]
+            raw_path = data_paths[idx]
             graph_path = _resolve_graph_path(raw_path)
             graph_name = raw_path.split("/")[-1]
-            ax.set_title(graph_name, fontsize=14, fontweight="medium")
+            ax.set_title(graph_name, fontsize=20, fontweight="medium")
 
             if graph_path is None:
                 ax.text(0.5, 0.5, "File not found", ha="center", va="center", fontsize=9)
@@ -96,20 +95,23 @@ def plot_powerlaw_grid(data_paths=DATA_PATHS, save_path="powerlaw_real_16.png"):
             ax.text(
                 0.95,
                 0.95,
-                f"alpha={alpha:.2f}\nxmin={xmin:.0f}",
+                fr"$\lambda$" + f"={alpha:.2f}",
                 transform=ax.transAxes,
                 ha="right",
                 va="top",
-                fontsize=8,
+                fontsize=16,
                 bbox=dict(boxstyle="round,pad=0.25", facecolor="white", alpha=0.75, edgecolor="none"),
             )
             ax.grid(alpha=0.25)
 
-            if c == 0:
-                ax.set_ylabel(f"{group}\nP(k)")
-            else:
-                ax.set_ylabel("P(k)")
-            ax.set_xlabel("k")
+            # powerlaw.plot_pdf 会设对数轴 + 默认 LogLocator(subs 含 2,5 等)，窄区间时主刻度过密；
+            # 仅改 formatter 不够（仍会有 2×10^n 主刻度）。主刻度只保留 10^n，并去掉次刻度文字。
+            ax.xaxis.set_major_locator(LogLocator(base=10, subs=(1.0,)))
+            ax.xaxis.set_major_formatter(LogFormatterMathtext())
+            ax.xaxis.set_minor_formatter(NullFormatter())
+
+            ax.set_ylabel("P(k)", fontsize=18)
+            ax.set_xlabel("k", fontsize=18)
 
     handles = [
         plt.Line2D([0], [0], color=empirical_color, lw=2, label="实际度分布"),
@@ -126,4 +128,4 @@ def plot_powerlaw_grid(data_paths=DATA_PATHS, save_path="powerlaw_real_16.png"):
 
 
 if __name__ == "__main__":
-    plot_powerlaw_grid(save_path="visualizations/powerlaw_real_16.png")
+    plot_powerlaw_grid(save_path="visualizations/powerlaw_3x3.png")

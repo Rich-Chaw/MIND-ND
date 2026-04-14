@@ -42,7 +42,7 @@ class Args:
     """validation frequency"""
     save_frequency: int = 1000
     """save frequency"""
-    learning_starts: int = 2000
+    learning_starts: int = 1000
     """timestep to start learning"""
     learning_rate: float = 3e-4
     """learning rate for the Q network"""
@@ -85,7 +85,7 @@ class Args:
     demo: bool = False
     """Collect teacher demonstrations before training"""
     demo_dir: List[str] = field(default_factory=lambda: [
-        "graphs/train/100_200_BA_5000",
+        'graphs/train/100_150_SBM_DCSBM_LPA_COPY_ER_6000',
     ])
     num_demos: int = 1000
     """Number of demonstration episodes to collect"""
@@ -113,7 +113,8 @@ class Args:
     """λ2: weight for L2 regularization loss J_L2"""
 
     train_dir: List[str] = field(default_factory=lambda: [
-        "graphs/train/100_200_BA_5000",
+        # "graphs/train/100_200_BA_5000",
+        'graphs/train/100_150_SBM_DCSBM_LPA_COPY_ER_6000',
     ])
     valid_dir: List[str] = field(default_factory=lambda: [
         "graphs/valid/valid"
@@ -227,7 +228,6 @@ if __name__ == "__main__":
         args.handcrafted_features,
     )
     policy = DQNPolicy(qf)
-    optimizer = torch.optim.Adam(qf.parameters(), lr=args.learning_rate, eps=1e-4)
 
     # ------------------------------------------------------------------
     # Demonstration collection and DQN pretraining on demos (Q-learning
@@ -263,6 +263,7 @@ if __name__ == "__main__":
 
         # ------------------- DQN Pretraining on D_demo -------------------
         if args.pretrain:
+            pre_optimizer = torch.optim.Adam(qf.parameters(), lr=args.learning_rate, eps=1e-4)
             qf.train()
             print(f"Starting DQN pretraining on demonstrations for {args.pretrain_steps} steps ...")
             for pre_step in range(args.pretrain_steps):
@@ -299,11 +300,11 @@ if __name__ == "__main__":
 
                 total_loss = td_loss + args.margin_coeff * margin_loss + args.l2_coeff * l2_loss
 
-                optimizer.zero_grad()
+                pre_optimizer.zero_grad()
                 total_loss.backward()
                 if args.max_grad_norm > 0:
                     torch.nn.utils.clip_grad_norm_(qf.parameters(), args.max_grad_norm)
-                optimizer.step()
+                pre_optimizer.step()
 
                 if pre_step % 100 == 0:
                     print(f"[PRE] step {pre_step}/{args.pretrain_steps}, total loss={total_loss.item():.4f}")
@@ -330,6 +331,8 @@ if __name__ == "__main__":
 
             # Cleanup
             del obs_b, act_b, obs_next_b, rew_b, done_b
+
+    optimizer = torch.optim.Adam(qf.parameters(), lr=args.learning_rate, eps=1e-4)
 
     num_eps, num_updates = 0, 0
     auc_buffer = deque(maxlen=20)

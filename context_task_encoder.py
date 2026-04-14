@@ -545,7 +545,7 @@ if __name__ == "__main__":
     print("\n[4/4] Training task encoder...")
     
     # Initialize GNN encoder (trainable)
-    gnn_encoder = GNN_ENCODER['hgnn_v3'](args.num_features, args.num_heads, args.num_mps).to(device)
+    gnn_encoder = GNN_ENCODER['rfgnn'](args.num_features, args.num_heads, args.num_mps).to(device)
     task_encoder = TaskEncoder(input_dim, args.hidden_dim, args.latent_dim).to(device)
     reward_decoder = RewardDecoder(state_emb_dim, args.latent_dim).to(device)
     state_decoder = StateDecoder(state_emb_dim, args.latent_dim).to(device)

@@ -33,7 +33,7 @@ class Args:
     """random seed"""
     device: str='cuda:0'
     """the device to use"""
-    gnn: str='hgnn_v3'
+    gnn: str='rfgnn'
 
     ckpt_pth: Optional[str]=None
     """where checkpoint was saved"""

@@ -19,8 +19,8 @@ def load_sac_dismantler(F=16, H=4, K=6, gnn=None, device=None, ckpt_pth=None, po
             H = args['num_heads']
             K = args['num_mps']
             gnn = args['gnn']
-            positional_encoding = args['positional_encoding']
-            handcrafted_features = args['handcrafted_features']
+            positional_encoding = args.get('positional_encoding', None)
+            handcrafted_features = args.get('handcrafted_features',False)
     
     policy = SACPolicy(F, H, K, gnn, positional_encoding, handcrafted_features).to(device)
     qf1 = SACQNetwork(F, H, K, gnn, positional_encoding, handcrafted_features).to(device)

@@ -10,9 +10,9 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.graph_data import Batch
 
 
-class LeanHybridConv(MessagePassing):
+class LeanHybridConvAblation(MessagePassing):
     def __init__(self, in_channels, out_channels, alpha=0.1, theta=0.5, layer=1):
-        super(LeanHybridConv, self).__init__(aggr='add')
+        super(LeanHybridConvAblation, self).__init__(aggr='add')
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.alpha = alpha  # Initial residual weight
@@ -60,7 +60,7 @@ class LeanHybridConv(MessagePassing):
         return alpha_ij * msg
 
 
-class HGNN_V3(nn.Module):
+class ResiflowGNN_Ablation(nn.Module):
     def __init__(self, num_features, num_heads, num_mps, alpha=0.1, theta=0.5, positional_encoding=None, handcrafted_features=False):
         super().__init__()
         self.num_features = 5 if handcrafted_features else num_features
@@ -70,7 +70,7 @@ class HGNN_V3(nn.Module):
 
         # Create lean hybrid layers with attention mechanism
         self.layers = nn.ModuleList([
-            LeanHybridConv(self.num_features, self.num_features, alpha, theta, layer=l+1)
+            LeanHybridConvAblation(self.num_features, self.num_features, alpha, theta, layer=l+1)
             for l in range(num_mps)
         ])
         self.graph_norm = GraphNorm(self.num_features * num_mps, eps=1e-4)
@@ -105,8 +105,8 @@ class HGNN_V3(nn.Module):
 
 
 # Simple test case
-def test_hgnn_v3():
-    """Test HGNN_V3 with a simple batch of graphs"""
+def test_rfgnn():
+    """Test ResiflowGNN with a simple batch of graphs"""
     import numpy as np
     import sys
     import os
@@ -127,12 +127,12 @@ def test_hgnn_v3():
     # Create batch
     batch = Batch(device, [graph1, graph2])
     
-    # Initialize HGNN_V3
+    # Initialize ResiflowGNN
     num_features = 16
-    num_heads = 4  # Not directly used in LeanHybridConv but kept for consistency
+    num_heads = 4  # Not directly used in LeanHybridConvAblation but kept for consistency
     num_mps = 3
     
-    model = HGNN_V3(num_features, num_heads, num_mps)
+    model = ResiflowGNN(num_features, num_heads, num_mps)
     
     # Forward pass
     with torch.no_grad():
@@ -147,12 +147,12 @@ def test_hgnn_v3():
     assert output.shape == (batch.non_omni_mask.sum(), 2 * num_features * num_mps), \
         f"Output shape mismatch: {output.shape} vs expected {(batch.non_omni_mask.sum(), 2 * num_features * num_mps)}"
     
-    print("HGNN_V3 test passed!")
+    print("ResiflowGNN test passed!")
     
     # Test with different parameters
     print("\nTesting with different layer configurations:")
     for num_layers in [1, 2, 4, 8]:
-        model_test = HGNN_V3(num_features, num_heads, num_layers)
+        model_test = ResiflowGNN(num_features, num_heads, num_layers)
         with torch.no_grad():
             output_test = model_test(batch)
         expected_features = 2 * num_features * num_layers
@@ -163,7 +163,7 @@ def test_hgnn_v3():
     
     # Test attention mechanism
     print("\nTesting attention mechanism properties:")
-    model_attention = HGNN_V3(num_features=8, num_heads=2, num_mps=2, alpha=0.2, theta=0.3)
+    model_attention = ResiflowGNN(num_features=8, num_heads=2, num_mps=2, alpha=0.2, theta=0.3)
     with torch.no_grad():
         output_attention = model_attention(batch)
     print(f"  Attention model output shape: {output_attention.shape}")
@@ -175,7 +175,7 @@ def test_hgnn_v3():
 
 
 def compare_hgnn_versions():
-    """Compare HGNN, HGNN_V2, and HGNN_V3 performance"""
+    """Compare HGNN, HGNN_V2, and ResiflowGNN performance"""
     import numpy as np
     import time
     import sys
@@ -214,7 +214,7 @@ def compare_hgnn_versions():
     # Initialize all models
     hgnn_v1 = HGNN(num_features, num_heads, num_mps)
     hgnn_v2 = HGNN_V2(num_features, num_heads, num_mps)
-    hgnn_v3 = HGNN_V3(num_features, num_heads, num_mps)
+    rfgnn = ResiflowGNN(num_features, num_heads, num_mps)
     
     print("Performance Comparison:")
     print(f"Batch: {batch.batch_size} graphs, {batch.total_nodes} total nodes")
@@ -231,15 +231,15 @@ def compare_hgnn_versions():
         output_v2 = hgnn_v2(batch)
     v2_time = time.time() - start_time
     
-    # Test HGNN_V3
+    # Test ResiflowGNN
     start_time = time.time()
     with torch.no_grad():
-        output_v3 = hgnn_v3(batch)
+        output_v3 = rfgnn(batch)
     v3_time = time.time() - start_time
     
     print(f"HGNN (v1):    {v1_time:.4f}s, Output shape: {output_v1.shape}")
     print(f"HGNN_V2:      {v2_time:.4f}s, Output shape: {output_v2.shape}")
-    print(f"HGNN_V3:      {v3_time:.4f}s, Output shape: {output_v3.shape}")
+    print(f"ResiflowGNN:      {v3_time:.4f}s, Output shape: {output_v3.shape}")
     print(f"V2 vs V1 Speedup: {v1_time/v2_time:.2f}x")
     print(f"V3 vs V1 Speedup: {v1_time/v3_time:.2f}x")
     print(f"V3 vs V2 Speedup: {v2_time/v3_time:.2f}x")
@@ -251,6 +251,6 @@ def compare_hgnn_versions():
 
 
 if __name__ == "__main__":
-    test_hgnn_v3()
+    test_rfgnn()
     print("\n" + "="*50)
     compare_hgnn_versions()

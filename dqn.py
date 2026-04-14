@@ -79,7 +79,8 @@ class Args:
     """gradient clipping norm; <=0 disables clipping"""
 
     train_dir: List[str] = field(default_factory=lambda: [
-        "graphs/train/100_200_BA_5000",
+        # "graphs/train/100_200_BA_5000",
+        'graphs/train/100_150_SBM_DCSBM_LPA_COPY_ER_6000',
     ])
     valid_dir: List[str] = field(default_factory=lambda: [
         "graphs/valid/valid"

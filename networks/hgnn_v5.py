@@ -1,5 +1,5 @@
 """
-HGNN_V4: Based on HGNN_V3 and MIND.
+HGNN_V4: Based on ResiflowGNN and MIND.
 - No initial residual (alpha) or alpha coefficient.
 - Multi-head like MIND (F divisible by H, per-head dimension D = F//H).
 - Attention inside message: attention-weighted lin_neigh(x_j) + attention-weighted lin_flow(x_j - x_i),

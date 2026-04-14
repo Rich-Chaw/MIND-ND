@@ -30,7 +30,7 @@ class Args:
     """random seed"""
     device: str='cuda:0'
     """the device to use"""
-    gnn: str='hgnn_v3'
+    gnn: str='rfgnn'
     num_envs: int=64
     """number of parallel environments,default 64"""
     total_steps: int=50000
@@ -45,7 +45,11 @@ class Args:
     """save frequency, default 1000"""
     learning_starts: int= 1000
     """timestep to start learning, default 2000"""
-    learning_rate: float=3e-4
+    learning_rate_phase_1: float=3e-4
+    learning_rate_phase_2 : float=1e-5
+    # Q_Lr/policy_lr
+    learning_rate_phase_2_ratio: float= 1.0
+
     """learning rate for the policy and the Q networks, original 3e-4"""
     tau: float=1.0
     """target smoothing factor,default 1.0"""
@@ -61,8 +65,19 @@ class Args:
     """number of network updates at each step, original 16"""
     target_frequency: int=200
     """the frequency for updating the target networks, default 200"""
+    sac_warmup: bool = False
+    """If True, freeze policy at SAC start and only update critics for a warmup period."""
+    sac_warmup_steps: int = 3000
+    """Number of SAC gradient updates to run with frozen policy (critic-only warmup)."""
 
-    # ckpt_pth: Optional[str]='./saved/hgnn_v3/sac_teacher_degree_20260318_150529/24999.ckpt'
+    sac_bc_coeff: float = 0.0
+    """If > 0, add λ * NLL(π, a_teacher) on replay samples tagged from_teacher (pulls policy toward demo/teacher manifold)."""
+    sac_bc_decay: bool = False
+    """If True, linearly decay sac_bc_coeff to 0 over sac_bc_decay_steps (by global_step)."""
+    sac_bc_decay_steps: int = 100000
+    """Steps for linear decay of sac_bc_coeff when sac_bc_decay is True."""
+
+    # ckpt_pth: Optional[str]='./saved/rfgnn/sac_teacher_degree_20260318_150529/24999.ckpt'
     ckpt_pth: Optional[str]=None
     """where ckeckpoint was saved"""
     
@@ -86,6 +101,7 @@ class Args:
         # 'graphs/demo/100_200_LFR_3000',
         # 'graphs/demo/100_200_LPA_Copy_ER_3000'
         'graphs/train/100_150_SBM_DCSBM_LPA_COPY_ER_6000'
+        # 'graphs/train/100_200_ER_LPA_Copy_rw_10000'
         # 'graphs/train/100_200_BA_5000'
         # 'graphs/train/100_200_DCSBM_5000'
     ])
@@ -138,6 +154,7 @@ class Args:
         # 'graphs/train/100_200_LPA_Copy_ER_5000'
         # 'graphs/train/100_200_DCSBM_5000'
         'graphs/train/100_150_SBM_DCSBM_LPA_COPY_ER_6000',
+        # 'graphs/train/100_200_ER_LPA_Copy_rw_10000'
     ])
     valid_dir: List[str] = field(default_factory=lambda: [
         'graphs/valid/valid'
@@ -255,130 +272,132 @@ if __name__ == "__main__":
             # log buffer size
             print(f"Saved {buffer.ptr} transitions from demonstration in buffer")
 
-        if args.bc:
-            print(f"Training behavior cloning for {args.bc_steps} steps using teacher demonstrations.")
-            bc_optimizer = torch.optim.Adam(
-                [p for p in policy.parameters() if p.requires_grad],
-                lr=args.learning_rate,
-                eps=1e-4,
-            )
-            bc_q_optimizer = None
-            if args.bc_supervise_q:
-                bc_q_optimizer = torch.optim.Adam(
-                     [p for p in list(qf1.parameters()) + list(qf2.parameters()) if p.requires_grad], 
-                    lr=args.learning_rate, 
-                    eps=1e-4)
-                print(
-                    f"BC also supervises Q networks."
+            if args.bc:
+                print(f"Training behavior cloning for {args.bc_steps} steps using teacher demonstrations.")
+                bc_optimizer = torch.optim.Adam(
+                    [p for p in policy.parameters() if p.requires_grad],
+                    lr=args.learning_rate_phase_1,
+                    eps=1e-4,
                 )
-
-            for bc_step in range(args.bc_steps):
-                # Sample transitions
-                samples = buffer.sample(args.batch_size)
-                if samples is None:
-                    print("No demonstrations in buffer; stopping behavior cloning.")
-                    break
-
-                obs_b, act_b, obs_next_b, rew_b, done_b = samples
-
-                # Compute log-probabilities over actions from the policy
-                _, logp_nodes = policy.get_action(obs_b, val=True)
-
-                # Map per-graph action indices to node indices
-                act_nodes = act_b + obs_b.act_offsets
-                logp_selected = logp_nodes[act_nodes]
-
-                bc_loss = -logp_selected.mean()
-
-                bc_optimizer.zero_grad()
-                bc_loss.backward()
-                bc_optimizer.step()
-
-                # ----- Q supervision on demos (same spirit as dqn_teacher pretrain) -----
-                if bc_q_optimizer is not None:
-                    alpha_bc = torch.tensor(args.alpha, device=device, dtype=torch.float32)
-                    with torch.no_grad():
-                        _, logp_next_b = policy.get_action(obs_next_b)
-                        qf1_next_b = qf1_target(obs_next_b)
-                        qf2_next_b = qf2_target(obs_next_b)
-                        qf_next_b = torch.min(qf1_next_b, qf2_next_b) - alpha_bc * logp_next_b
-                        b_next = obs_next_b.batch[obs_next_b.non_omni_mask]
-                        v_next_b = scatter_add(
-                            logp_next_b.exp() * qf_next_b, b_next, dim_size=obs_next_b.batch_size
-                        )
-                        q_target_b = rew_b.flatten() + (1 - done_b.flatten()) * args.gamma * v_next_b
-
-                    q1_all = qf1(obs_b)
-                    q2_all = qf2(obs_b)
-                    q1_pred = q1_all.gather(0, act_nodes).flatten()
-                    q2_pred = q2_all.gather(0, act_nodes).flatten()
-                    td_loss = mse_loss(q1_pred, q_target_b) + mse_loss(q2_pred, q_target_b)
-
-                    margin = torch.full_like(q1_all, args.bc_margin_value)
-                    margin.index_fill_(0, act_nodes, 0.0)
-                    aug1 = q1_all + margin
-                    aug2 = q2_all + margin
-                    max1, _ = scatter_max(aug1, obs_b.batch_non_omni, dim_size=obs_b.batch_size)
-                    max2, _ = scatter_max(aug2, obs_b.batch_non_omni, dim_size=obs_b.batch_size)
-                    q1_e = q1_all.gather(0, act_nodes)
-                    q2_e = q2_all.gather(0, act_nodes)
-                    margin_loss = (max1 - q1_e).mean() + (max2 - q2_e).mean()
-
-                    l2_q = sum(p.pow(2).sum() for p in qf1.parameters() if p.requires_grad) + sum(
-                        p.pow(2).sum() for p in qf2.parameters() if p.requires_grad
+                bc_q_optimizer = None
+                if args.bc_supervise_q:
+                    bc_q_optimizer = torch.optim.Adam(
+                        [p for p in list(qf1.parameters()) + list(qf2.parameters()) if p.requires_grad], 
+                        lr=args.learning_rate_phase_1, 
+                        eps=1e-4)
+                    print(
+                        f"BC also supervises Q networks."
                     )
-                    q_bc_loss = td_loss + args.bc_margin_coeff * margin_loss + args.bc_l2_coeff * l2_q
 
-                    bc_q_optimizer.zero_grad()
-                    q_bc_loss.backward()
-                    bc_q_optimizer.step()
+                for bc_step in range(args.bc_steps):
+                    # Sample transitions
+                    samples = buffer.sample(args.batch_size)
+                    if samples is None:
+                        print("No demonstrations in buffer; stopping behavior cloning.")
+                        break
 
-                if bc_step % 100 == 0:
-                    msg = f"[BC] step {bc_step}/{args.bc_steps}, policy_loss={bc_loss.item():.4f}"
+                    obs_b, act_b, obs_next_b, rew_b, done_b = samples
+
+                    # Compute log-probabilities over actions from the policy
+                    _, logp_nodes = policy.get_action(obs_b, val=True)
+
+                    # Map per-graph action indices to node indices
+                    act_nodes = act_b + obs_b.act_offsets
+                    logp_selected = logp_nodes[act_nodes]
+
+                    bc_loss = -logp_selected.mean()
+
+                    bc_optimizer.zero_grad()
+                    bc_loss.backward()
+                    bc_optimizer.step()
+
+                    # ----- Q supervision on demos (same spirit as dqn_teacher pretrain) -----
                     if bc_q_optimizer is not None:
-                        msg += f", q_loss={q_bc_loss.item():.4f} (td={td_loss.item():.4f}, margin={margin_loss.item():.4f})"
-                    print(msg)
-                    if args.use_tb:
-                        writer.add_scalar("bc/policy_loss", bc_loss.item(), bc_step)
+                        alpha_bc = torch.tensor(args.alpha, device=device, dtype=torch.float32)
+                        with torch.no_grad():
+                            _, logp_next_b = policy.get_action(obs_next_b)
+                            qf1_next_b = qf1_target(obs_next_b)
+                            qf2_next_b = qf2_target(obs_next_b)
+                            qf_next_b = torch.min(qf1_next_b, qf2_next_b) - alpha_bc * logp_next_b
+                            b_next = obs_next_b.batch[obs_next_b.non_omni_mask]
+                            v_next_b = scatter_add(
+                                logp_next_b.exp() * qf_next_b, b_next, dim_size=obs_next_b.batch_size
+                            )
+                            q_target_b = rew_b.flatten() + (1 - done_b.flatten()) * args.gamma * v_next_b
+
+                        q1_all = qf1(obs_b)
+                        q2_all = qf2(obs_b)
+                        q1_pred = q1_all.gather(0, act_nodes).flatten()
+                        q2_pred = q2_all.gather(0, act_nodes).flatten()
+                        td_loss = mse_loss(q1_pred, q_target_b) + mse_loss(q2_pred, q_target_b)
+
+                        margin = torch.full_like(q1_all, args.bc_margin_value)
+                        margin.index_fill_(0, act_nodes, 0.0)
+                        aug1 = q1_all + margin
+                        aug2 = q2_all + margin
+                        max1, _ = scatter_max(aug1, obs_b.batch_non_omni, dim_size=obs_b.batch_size)
+                        max2, _ = scatter_max(aug2, obs_b.batch_non_omni, dim_size=obs_b.batch_size)
+                        q1_e = q1_all.gather(0, act_nodes)
+                        q2_e = q2_all.gather(0, act_nodes)
+                        margin_loss = (max1 - q1_e).mean() + (max2 - q2_e).mean()
+
+                        l2_q = sum(p.pow(2).sum() for p in qf1.parameters() if p.requires_grad) + sum(
+                            p.pow(2).sum() for p in qf2.parameters() if p.requires_grad
+                        )
+                        q_bc_loss = td_loss + args.bc_margin_coeff * margin_loss + args.bc_l2_coeff * l2_q
+
+                        bc_q_optimizer.zero_grad()
+                        q_bc_loss.backward()
+                        bc_q_optimizer.step()
+
+                    if bc_step % 100 == 0:
+                        msg = f"[BC] step {bc_step}/{args.bc_steps}, policy_loss={bc_loss.item():.4f}"
                         if bc_q_optimizer is not None:
-                            writer.add_scalar("bc/q_total_loss", q_bc_loss.item(), bc_step)
-                            writer.add_scalar("bc/q_td_loss", td_loss.item(), bc_step)
-                            writer.add_scalar("bc/q_margin_loss", margin_loss.item(), bc_step)
+                            msg += f", q_loss={q_bc_loss.item():.4f} (td={td_loss.item():.4f}, margin={margin_loss.item():.4f})"
+                        print(msg)
+                        if args.use_tb:
+                            writer.add_scalar("bc/policy_loss", bc_loss.item(), bc_step)
+                            if bc_q_optimizer is not None:
+                                writer.add_scalar("bc/q_total_loss", q_bc_loss.item(), bc_step)
+                                writer.add_scalar("bc/q_td_loss", td_loss.item(), bc_step)
+                                writer.add_scalar("bc/q_margin_loss", margin_loss.item(), bc_step)
 
-            # Align target critics with online after BC (online Q was trained; targets were fixed for bootstrap)
-            if bc_q_optimizer is not None:
-                qf1_target.load_state_dict(qf1.state_dict())
-                qf2_target.load_state_dict(qf2.state_dict())
-                print("qf1_target / qf2_target synchronized with qf1 / qf2 after BC.")
+                # Align target critics with online after BC (online Q was trained; targets were fixed for bootstrap)
+                if bc_q_optimizer is not None:
+                    qf1_target.load_state_dict(qf1.state_dict())
+                    qf2_target.load_state_dict(qf2.state_dict())
+                    print("qf1_target / qf2_target synchronized with qf1 / qf2 after BC.")
 
-            directory = os.path.join('saved', run_path)
-            if not os.path.exists(directory):
-                os.makedirs(directory)
-            torch.save({
-                    "buffer_state_dict": buffer.get_state_dict(),
-                    "policy_state_dict": policy.state_dict(),
-                    "qf1_state_dict": qf1.state_dict(),
-                    "qf2_state_dict": qf2.state_dict(),
-                    "qf1_target_state_dict": qf1_target.state_dict(),
-                    "qf2_target_state_dict": qf2_target.state_dict(),
-                },
-                os.path.join(directory, "bc.ckpt"),
-            )
-            print(f"Saved behavior cloning checkpoint to {os.path.join(directory, 'bc.ckpt')}")
+                directory = os.path.join('saved', run_path)
+                if not os.path.exists(directory):
+                    os.makedirs(directory)
+                torch.save({
+                        "buffer_state_dict": buffer.get_state_dict(),
+                        "policy_state_dict": policy.state_dict(),
+                        "qf1_state_dict": qf1.state_dict(),
+                        "qf2_state_dict": qf2.state_dict(),
+                        "qf1_target_state_dict": qf1_target.state_dict(),
+                        "qf2_target_state_dict": qf2_target.state_dict(),
+                    },
+                    os.path.join(directory, "bc.ckpt"),
+                )
+                print(f"Saved behavior cloning checkpoint to {os.path.join(directory, 'bc.ckpt')}")
 
-            # Cleanup
-            del obs_b, act_b, obs_next_b, rew_b, done_b
+                # Cleanup
+                del obs_b, act_b, obs_next_b, rew_b, done_b
     
     # Setup optimizers with appropriate learning rates
-    lr = args.learning_rate
-    print(f'Using learning rate: {lr}')
+    lr = args.learning_rate_phase_2
+    print(f'Using learning rate for policy: {lr}')
+    q_lr = lr * args.learning_rate_phase_2_ratio
+    print(f'Using learning rate for Q: {q_lr}')
     
     # Only optimize trainable parameters
     q_params = [p for p in list(qf1.parameters()) + list(qf2.parameters()) if p.requires_grad]
     policy_params = [p for p in policy.parameters() if p.requires_grad]
     
     q_optimizer = torch.optim.Adam(q_params, lr=lr, eps=1e-4)
-    policy_optimizer = torch.optim.Adam(policy_params, lr=lr, eps=1e-4)
+    policy_optimizer = torch.optim.Adam(policy_params, lr=q_lr, eps=1e-4)
 
     log_alpha = None
     alpha_optimizer = None
@@ -386,7 +405,17 @@ if __name__ == "__main__":
         log_alpha = torch.tensor(np.log(args.alpha), device=device, dtype=torch.float32, requires_grad=True)
         alpha_optimizer = torch.optim.Adam([log_alpha], lr=lr, eps=1e-4)
         print(f"Alpha adaptive: target_entropy H_bar = {args.target_entropy}")
-    
+    if args.sac_warmup and args.sac_warmup_steps > 0:
+        print(
+            f"SAC warmup enabled: freeze policy for first {args.sac_warmup_steps} updates "
+            f"(critic-only), then switch to joint updates."
+        )
+    if args.sac_bc_coeff > 0:
+        print(
+            f"SAC teacher BC regularization: coeff={args.sac_bc_coeff}, "
+            f"decay={args.sac_bc_decay}, decay_steps={args.sac_bc_decay_steps}"
+        )
+
     num_eps, num_updates = 0, 0
     auc_buffer = deque(maxlen=20)
     start_time = time.time()
@@ -484,10 +513,14 @@ if __name__ == "__main__":
                 samples = buffer.sample(
                     args.batch_size,
                     priority=args.priority_type,
-                    return_indices=True
+                    return_indices=True,
+                    return_tags=(args.sac_bc_coeff > 0),
                 )
-                
-                if len(samples) == 6:
+                sample_indices = None
+                teacher_tags = None
+                if len(samples) == 7:
+                    obs_b, act_b, obs_next_b, rew_b, done_b, sample_indices, teacher_tags = samples
+                elif len(samples) == 6:
                     obs_b, act_b, obs_next_b, rew_b, done_b, sample_indices = samples
                 elif len(samples) == 5:
                     obs_b, act_b, obs_next_b, rew_b, done_b = samples
@@ -539,63 +572,88 @@ if __name__ == "__main__":
                 
                 q_optimizer.zero_grad(); q_loss.backward(); q_optimizer.step()
                 
-                # ---------------------- ACTOR Training ----------------------------
-                _, logp_b = policy.get_action(obs_b)
-                
-                # Standard SAC actor loss
-                with torch.no_grad():
-                    qf1_b = qf1(obs_b)
-                    qf2_b = qf2(obs_b)
-                v_b = logp_b.exp() * (alpha.detach() * logp_b - torch.min(qf1_b, qf2_b))
-                b = obs_b.batch[obs_b.non_omni_mask]
-                
-                # original: policy_loss = scatter_add(v_b, b, dim_size=obs_b.batch_size).mean()
-                policy_loss_per_graph = scatter_add(v_b, b, dim_size=obs_b.batch_size)
-                policy_loss = (policy_loss_per_graph).mean()
-                
-                # Compute policy gradient norm for DDPGfD priority update (after backward pass)
-                if sample_indices is not None:
-                    # Capture gradient norm after backward pass (more efficient)
-                    policy_grad_norm = 0.0
-                    for param in policy.parameters():
-                        if param.grad is not None:
-                            param_norm = param.grad.data.norm(2)
-                            policy_grad_norm += param_norm.item() ** 2
-                    policy_grad_norm = policy_grad_norm ** (1. / 2)
-                    
-                    # Update policy gradient norms in buffer
-                    policy_grad_norms = np.full(len(sample_indices), policy_grad_norm, dtype=np.float32)
-                    buffer.update_policy_grad_norms(sample_indices, policy_grad_norms)
-                    
-                # Add L2 regularization
-                if args.regularization:
-                    policy_l2_reg = sum(torch.norm(p, p=2) ** 2 for p in policy.parameters() if p.requires_grad)
-                    policy_loss = policy_loss + args.regular_coeff * policy_l2_reg
-                
-                policy_optimizer.zero_grad(); policy_loss.backward(); policy_optimizer.step()
+                freeze_policy = (
+                    args.sac_warmup
+                    and args.sac_warmup_steps > 0
+                    and global_step < args.sac_warmup_steps
+                )
 
-                # ---------------  ADAPTIVE ALPHA (minimize J(alpha) = E[-alpha*log pi(a|s) - alpha*H_bar]) ---------------
-                if args.alpha_adaptive:
-                    logp_taken = logp_b.gather(0, act_b).flatten().detach()
-                    alpha_loss = (alpha * (-logp_taken - args.target_entropy)).mean()
-                    alpha_optimizer.zero_grad()
-                    alpha_loss.backward()
-                    alpha_optimizer.step()
-                    if args.use_tb and num_updates % args.target_frequency == 0:
-                        writer.add_scalar("entropy/entropy",logp_b.mean().item(), global_step)
-                        writer.add_scalar("entropy/alpha", alpha.item(), global_step)
-                        writer.add_scalar("entropy/alpha_loss", alpha_loss.item(), global_step)
+                if freeze_policy:
+                    policy_loss = None
+                    logp_b = None
+                    alpha_loss = None
+                else:
+                    # ---------------------- ACTOR Training ----------------------------
+                    _, logp_b = policy.get_action(obs_b)
+                    
+                    # Standard SAC actor loss
+                    with torch.no_grad():
+                        qf1_b = qf1(obs_b)
+                        qf2_b = qf2(obs_b)
+                    v_b = logp_b.exp() * (alpha.detach() * logp_b - torch.min(qf1_b, qf2_b))
+                    b = obs_b.batch[obs_b.non_omni_mask]
+                    
+                    # original: policy_loss = scatter_add(v_b, b, dim_size=obs_b.batch_size).mean()
+                    policy_loss_per_graph = scatter_add(v_b, b, dim_size=obs_b.batch_size)
+                    policy_loss = (policy_loss_per_graph).mean()
+
+                    if args.sac_bc_coeff > 0 and teacher_tags is not None:
+                        lam = args.sac_bc_coeff
+                        if args.sac_bc_decay and args.sac_bc_decay_steps > 0:
+                            lam *= max(0.0, 1.0 - float(global_step-args.learning_starts) / float(args.sac_bc_decay_steps))
+                        tmask = teacher_tags > 0.5
+                        if lam > 0 and tmask.any():
+                            logp_taken_demo = logp_b.gather(0, act_b).flatten()
+                            teacher_bc_loss = -(logp_taken_demo[tmask]).mean()
+                            policy_loss = policy_loss + lam * teacher_bc_loss
+                    
+                    # Compute policy gradient norm for DDPGfD priority update (after backward pass)
+                    if sample_indices is not None:
+                        # Capture gradient norm after backward pass (more efficient)
+                        policy_grad_norm = 0.0
+                        for param in policy.parameters():
+                            if param.grad is not None:
+                                param_norm = param.grad.data.norm(2)
+                                policy_grad_norm += param_norm.item() ** 2
+                        policy_grad_norm = policy_grad_norm ** (1. / 2)
+                        
+                        # Update policy gradient norms in buffer
+                        policy_grad_norms = np.full(len(sample_indices), policy_grad_norm, dtype=np.float32)
+                        buffer.update_policy_grad_norms(sample_indices, policy_grad_norms)
+                        
+                    # Add L2 regularization
+                    if args.regularization:
+                        policy_l2_reg = sum(torch.norm(p, p=2) ** 2 for p in policy.parameters() if p.requires_grad)
+                        policy_loss = policy_loss + args.regular_coeff * policy_l2_reg
+                    
+                    policy_optimizer.zero_grad(); policy_loss.backward(); policy_optimizer.step()
+
+                    # ---------------  ADAPTIVE ALPHA (minimize J(alpha) = E[-alpha*log pi(a|s) - alpha*H_bar]) ---------------
+                    alpha_loss = None
+                    if args.alpha_adaptive:
+                        logp_taken = logp_b.gather(0, act_b).flatten().detach()
+                        alpha_loss = (alpha * (-logp_taken - args.target_entropy)).mean()
+                        alpha_optimizer.zero_grad()
+                        alpha_loss.backward()
+                        alpha_optimizer.step()
+                        if args.use_tb and num_updates % args.target_frequency == 0:
+                            writer.add_scalar("entropy/entropy",logp_b.mean().item(), global_step)
+                            writer.add_scalar("entropy/alpha", alpha.item(), global_step)
+                            writer.add_scalar("entropy/alpha_loss", alpha_loss.item(), global_step)
                 
                 # Explicit cleanup of training tensors
                 del obs_b, act_b, obs_next_b, rew_b, done_b
                 if sample_indices is not None:
                     del sample_indices
+                if teacher_tags is not None:
+                    del teacher_tags
                 
                 if args.use_tb and num_updates%args.target_frequency == 0:
                     writer.add_scalar("losses/q1(s,a)", q1_b.mean().item(), global_step)
                     writer.add_scalar("losses/q2(s,a)", q2_b.mean().item(), global_step)
                     writer.add_scalar("losses/q_loss", q_loss.item() / 2.0, global_step)
-                    writer.add_scalar("losses/policy_loss", -policy_loss.item(), global_step)
+                    if policy_loss is not None:
+                        writer.add_scalar("losses/policy_loss", -policy_loss.item(), global_step)
                     
                 num_updates += 1
             

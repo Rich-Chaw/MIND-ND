@@ -101,6 +101,24 @@ def core_hd(G, max_steps=None, threshold=None):
         
     return removals
 
+def degree(G, max_steps=None, threshold=None):
+    """degree centrality dismantling - compute all degree from beginning"""
+    temp_G = G.copy()
+    ensure_attribute(temp_G)
+    
+    if max_steps == None:
+        max_steps = temp_G.vcount()
+    else:
+        max_steps = min(temp_G.vcount(), max_steps)
+    
+    degree_list= temp_G.degree()
+    sorted_indices = np.argsort(degree_list)[::-1]
+    
+    # Return the static_ids of top max_steps nodes
+    removals = [temp_G.vs[i]['static_id'] for i in sorted_indices[:max_steps]]
+
+    return removals
+
 def adaptive_degree(G, max_steps=None, threshold=None):
     temp_G = G.copy()
     ensure_attribute(temp_G)
@@ -161,11 +179,11 @@ def betweenness(G, max_steps=None, threshold=None):
     else:
         max_steps = min(temp_G.vcount(), max_steps)
     
-    betweenness= temp_G.betweenness()
-    sorted_indices = np.argsort(betweenness)[::-1]
+    betweenness_list= temp_G.betweenness()
+    sorted_indices = np.argsort(betweenness_list)[::-1]
     
     # Return the static_ids of top max_steps nodes
-    removals = sorted_indices[:max_steps]
+    removals = [temp_G.vs[i]['static_id'] for i in sorted_indices[:max_steps]]
 
     return removals
 
@@ -621,8 +639,9 @@ BASE_METHODS = {
     "CoreHD": core_hd,
     "Spectral": spectral_dismantling,
     "Degree": adaptive_degree,
-    "BetweennessNA": betweenness,
+    "DegreeNA":degree,
     "Betweenness": adaptive_betweenness,
+    "BetweennessNA": betweenness,
     "PageRank": adaptive_pagerank,
     "CI": adaptive_ci,
 }

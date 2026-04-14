@@ -7,10 +7,10 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from networks.hgnn import HGNN
 from networks.hgnn_v2 import HGNN_V2
-from networks.hgnn_v3 import HGNN_V3
+from networks.rfgnn import ResiflowGNN
 from networks.hgnn_v4 import HGNN_V4
 from networks.hgnn_v5 import HGNN_V5
-from networks.classical_gnns import GCN, GraphSAGE, GAT
+from networks.classical_gnns import GCN, GraphSAGE, GAT, GIN
 from networks.mind import MIND
 from networks.idgnn import IDGCN, IDGAT, IDGIN, IDSAGE
 from networks.gcnii import GCNII
@@ -23,7 +23,7 @@ from networks.hm_gnn_v5 import HM_GNN_V5
 GNN_ENCODER = {
     'gcn':GCN,
     'graphsage':GraphSAGE,
-    # 'gin':GIN,
+    'gin': GIN,
     'gat': GAT,
     'mind': MIND,
     'idgcn': IDGCN,
@@ -33,7 +33,7 @@ GNN_ENCODER = {
     'gcnii':GCNII,
     'hgnn': HGNN,
     'hgnn_v2': HGNN_V2,
-    'hgnn_v3': HGNN_V3,
+    'rfgnn': ResiflowGNN,
     'hgnn_v4': HGNN_V4,
     'hgnn_v5': HGNN_V5,
     'hm_gnn': HM_GNN,

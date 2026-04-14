@@ -31,7 +31,7 @@ class Args:
     """random seed"""
     device: str='cuda:0'
     """the device to use"""
-    gnn: str='hgnn_v3'
+    gnn: str='rfgnn'
     num_envs: int=64
     """number of parallel environments,default 64"""
     total_steps: int=200000
@@ -131,7 +131,7 @@ if __name__ == "__main__":
     input_dim = state_emb_dim + 1 + 1 + state_emb_dim  # state + action + reward + next_state
     
     # Load GNN encoder (used for encoding states in context)
-    gnn_encoder = GNN_ENCODER['hgnn_v3'](args.num_features, args.num_heads, args.num_mps).to(device)
+    gnn_encoder = GNN_ENCODER['rfgnn'](args.num_features, args.num_heads, args.num_mps).to(device)
     gnn_encoder.load_state_dict(task_encoder_ckpt['gnn_encoder_state_dict'])
     gnn_encoder.eval()
     
