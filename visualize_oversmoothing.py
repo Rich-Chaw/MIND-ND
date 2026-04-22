@@ -9,6 +9,8 @@ import torch
 import torch.nn.functional as F
 
 from networks.classical_gnns import GAT, GCN, GraphSAGE
+from networks.gcnii import GCNII
+from networks.idgnn import IDGCN
 from networks.rfgnn import ResiflowGNN
 from utils.graph_data import Batch, Graph
 
@@ -25,14 +27,18 @@ MODEL_REGISTRY = {
     "GCN": GCN,
     "GraphSAGE": GraphSAGE,
     "GAT": GAT,
-    "Resiflow-GNN": ResiflowGNN,
+    "IDGNN": IDGCN,
+    "GCNII": GCNII,
+    "ResiFlow-GNN": ResiflowGNN,
 }
 
 MODEL_COLORS = {
     "GCN": "#1f77b4",
     "GraphSAGE": "#ff7f0e",
     "GAT": "#2ca02c",
-    "Resiflow-GNN": "#d62728",
+    "IDGNN": "#9467bd",
+    "GCNII": "#8c564b",
+    "ResiFlow-GNN": "#d62728",
 }
 
 
@@ -163,7 +169,30 @@ def extract_layer_embeddings_and_metrics(
     x = input_x.clone()
     collapse_by_layer: List[np.ndarray] = []
     metric_list: List[Dict[str, float]] = []
-    if hasattr(model, "convs"):
+    if model_name == "IDGNN":
+        for conv in model.convs:
+            x = conv(x, batch.edge_index, batch.omni_ids)
+            x = F.relu(x)
+            if use_l2_norm:
+                x = F.normalize(x, p=2, dim=-1, eps=1e-12)
+            collapse_by_layer.append(compute_collapse_distances(x, batch))
+            metric_list.append(compute_layer_metrics(x, batch))
+    elif model_name == "GCNII":
+        adj = torch.sparse_coo_tensor(
+            batch.edge_index,
+            torch.ones(batch.edge_index.shape[1], device=batch.device),
+            (batch.total_nodes, batch.total_nodes),
+        ).coalesce()
+        x = model.act_fn(model.fc_in(x))
+        h0 = x.clone()
+        for i, conv in enumerate(model.convs):
+            x = conv(x, adj, h0, model.lamda, model.alpha, i + 1)
+            x = F.relu(x)
+            if use_l2_norm:
+                x = F.normalize(x, p=2, dim=-1, eps=1e-12)
+            collapse_by_layer.append(compute_collapse_distances(x, batch))
+            metric_list.append(compute_layer_metrics(x, batch))
+    elif hasattr(model, "convs"):
         for conv in model.convs:
             x = conv(x, batch.edge_index)
             x = F.relu(x)
@@ -215,7 +244,7 @@ def plot_oversmoothing_proof(results_by_model: Dict[str, Dict[str, List]], save_
     ax_dir.grid(alpha=0.25)
     ax_dir.legend(fontsize=14)
 
-    fig.suptitle("Oversmoothing diagnostics", fontsize=22, y=1.03)
+    # fig.suptitle("Oversmoothing diagnostics", fontsize=22, y=1.03)
     fig.tight_layout()
     fig.savefig(save_path, dpi=170, bbox_inches="tight")
     print(f"Saved to {save_path}")
@@ -265,7 +294,7 @@ def main() -> None:
     )
 
     results_by_model: Dict[str, Dict[str, List]] = {}
-    for model_name in ["GCN", "GraphSAGE", "GAT", "Resiflow-GNN"]:
+    for model_name in ["GCN", "GraphSAGE", "GAT", "IDGNN", "GCNII", "ResiFlow-GNN"]:
     # for model_name in ["GCN", "GraphSAGE", "GAT"]:
         results_by_model[model_name] = extract_layer_embeddings_and_metrics(
             model_name=model_name,

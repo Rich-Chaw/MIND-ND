@@ -5,6 +5,8 @@ from typing import List, Union, Optional
 
 from env.graph_pool import GraphPool
 from utils import plot_process, load_g
+from utils.graph_data import _set_init_features
+
 
 class DismantleEnv:
     def __init__(self,
@@ -45,6 +47,27 @@ class DismantleEnv:
         self.reward_type = reward_type
         self.threshold = threshold
         self.prev_lcc_arr = None  # used for reward_type=1: (LCC_{t-1} - LCC_t)/N
+
+    def init_features(
+        self,
+        num_features: int,
+        init_method = 'ONES',
+        attr_name: str = "x_init",
+    ) -> None:
+        """
+        Precompute initial node features for all graphs in env graph pool source.
+        Features are stored in vertex attributes (default: `x_init`) and will be
+        preserved when graphs are copied into active pool / observations.
+        """
+        if not self.graph_data:
+            return
+
+        _set_init_features(
+            self.graph_data,
+            num_features=num_features,
+            init_method=init_method,
+            attr_name=attr_name,
+        )
 
     def reset(self):
         self.pool = GraphPool(

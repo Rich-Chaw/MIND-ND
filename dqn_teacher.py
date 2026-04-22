@@ -68,6 +68,10 @@ class Args:
     """node initial features: None = all ones, 'RW' = random walk return-probability encoding"""
     handcrafted_features: bool = False
     """if True, use 5 handcrafted features"""
+    init_graph: bool = False
+    """if True, precompute and persist initial node features in graph vertex attributes"""
+    init_method: str = 'ONES'
+    """initial node feature method for env graph_data, e.g. ONES or RANDOM"""
     reward_type: Optional[int] = 0
     """0: -LCC_t/N   1:(LCC_t-1 - LCC_t) / N"""
     eps_start: float = 1.0
@@ -211,6 +215,11 @@ if __name__ == "__main__":
         )
     else:
         env_demo = env
+    if args.init_graph:
+        env.init_features(args.num_features, init_method=args.init_method, attr_name='x_init')
+        env_val.init_features(args.num_features, init_method=args.init_method, attr_name='x_init')
+        if env_demo is not env:
+            env_demo.init_features(args.num_features, init_method=args.init_method, attr_name='x_init')
 
     # Use PriorReplayBuffer so we can pin teacher demonstrations
     buffer = PriorReplayBuffer(args.buffer_size, device)

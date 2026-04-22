@@ -8,6 +8,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from networks.hgnn import HGNN
 from networks.hgnn_v2 import HGNN_V2
 from networks.rfgnn import ResiflowGNN
+from networks.rfgnn_v2 import ResiflowGNN_V2
 from networks.hgnn_v4 import HGNN_V4
 from networks.hgnn_v5 import HGNN_V5
 from networks.classical_gnns import GCN, GraphSAGE, GAT, GIN
@@ -19,6 +20,10 @@ from networks.hm_gnn_v2 import HM_GNN_V2
 from networks.hm_gnn_v3 import HM_GNN_V3
 from networks.hm_gnn_v4 import HM_GNN_V4
 from networks.hm_gnn_v5 import HM_GNN_V5
+from networks.esan import ESANEncoder
+from networks.exphormer import ExphormerEncoder
+from networks.nagphormer import NAGphormerEncoder
+from networks.sgformer import SGFormerEncoder
 
 GNN_ENCODER = {
     'gcn':GCN,
@@ -34,6 +39,7 @@ GNN_ENCODER = {
     'hgnn': HGNN,
     'hgnn_v2': HGNN_V2,
     'rfgnn': ResiflowGNN,
+    'rfgnn_v2': ResiflowGNN_V2,
     'hgnn_v4': HGNN_V4,
     'hgnn_v5': HGNN_V5,
     'hm_gnn': HM_GNN,
@@ -41,6 +47,10 @@ GNN_ENCODER = {
     'hm_gnn_v3': HM_GNN_V3,
     'hm_gnn_v4': HM_GNN_V4,
     'hm_gnn_v5': HM_GNN_V5,
+    'esan': ESANEncoder,
+    'exphormer': ExphormerEncoder,
+    'nagphormer': NAGphormerEncoder,
+    'sgformer': SGFormerEncoder,
 }
 
 if __name__ == '__main__':

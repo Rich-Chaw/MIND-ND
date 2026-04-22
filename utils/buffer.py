@@ -47,6 +47,54 @@ class ReplayBuffer():
         
         return obs, act, obs_next, rew, done
 
+
+class AdaptionBuffer:
+    def __init__(self, buffer_size, device):
+        self.buffer_size = buffer_size
+        self.device = device
+        self.ptr = 0
+        self.full = False
+        self.obs_buffer = np.empty(buffer_size, dtype=object)   # ig_to_data output
+        self.type_buffer = np.empty(buffer_size, dtype=object)  # "synth" / "real"
+
+    def _size(self):
+        return self.buffer_size if self.full else self.ptr
+
+    def add(self, obs_list):
+        num_t = len(obs_list)
+        idx = np.arange(self.ptr, self.ptr + num_t) % self.buffer_size
+        self.obs_buffer[idx] = np.array([ig_to_data(g) for g in obs_list], dtype=object)
+        self.type_buffer[idx] = np.array([g["type"] for g in obs_list], dtype=object)
+        end = self.ptr + num_t
+        if end >= self.buffer_size:
+            self.full = True
+        self.ptr = end % self.buffer_size
+
+    def sample_balanced(self, batch_size):
+        size = self._size()
+        if size == 0:
+            return None, None
+        all_idx = np.arange(size)
+        types = self.type_buffer[all_idx]
+        synth_idx = all_idx[types == "synth"]
+        real_idx = all_idx[types == "real"]
+        if len(synth_idx) == 0 or len(real_idx) == 0:
+            pick = np.random.choice(all_idx, size=min(batch_size, size), replace=True)
+        else:
+            n_synth = batch_size // 2
+            n_real = batch_size - n_synth
+            pick_s = np.random.choice(synth_idx, size=n_synth, replace=len(synth_idx) < n_synth)
+            pick_r = np.random.choice(real_idx, size=n_real, replace=len(real_idx) < n_real)
+            pick = np.concatenate([pick_s, pick_r])
+            np.random.shuffle(pick)
+        obs = Batch(self.device, self.obs_buffer[pick].tolist())
+        is_synth = torch.tensor(
+            self.type_buffer[pick] == "synth",
+            device=self.device,
+            dtype=torch.bool,
+        )
+        return obs, is_synth
+
 class PriorReplayBuffer():
     def __init__(self, buffer_size, device, gamma=1.0, alpha=0.3, beta=1.0, lambda_grad=1.0, teacher_bonus=1.0, epsilon=1e-6):
         self.buffer_size = buffer_size

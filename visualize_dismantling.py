@@ -178,7 +178,7 @@ def create_dismantling_process(graph, removals, method_name, max_steps=6):
 def visualize_multiple_curve(graph, methods_results,main_method=None,step_ratio = None, save_path=None):
     """Create a static comparison plot"""
     
-    plt.figure(figsize=(12, 8))
+    plt.figure(figsize=(8, 8))
     n_init = graph.vcount()
     max_fraction_removed = 0.0
     # colors = ['blue', 'green', 'orange', 'purple']
@@ -205,13 +205,15 @@ def visualize_multiple_curve(graph, methods_results,main_method=None,step_ratio 
                 color = _BASELINE_METHOD_PALETTE[method_name]
             else:
                 color = _OUR_METHOD_PALETTE[i % len(_OUR_METHOD_PALETTE)]
+        # plt.plot(x, y, color=color, linewidth=2,linestyle= '--',
+        #         marker='o', markersize=3, label=f"{method_name}  AUC={result['auc']:.4f}  Steps={len(removed_sizes)}", alpha=0.8)
         plt.plot(x, y, color=color, linewidth=2,linestyle= '--',
-                marker='o', markersize=3, label=f"{method_name}  AUC={result['auc']:.4f}  Steps={len(removed_sizes)}", alpha=0.8)
-    
-    plt.xlabel('Removed Ratio', fontsize=20)
+                marker='o', markersize=3, label=f"{method_name}  AUC={result['auc']:.4f}", alpha=0.8)
+
+    plt.xlabel('The Fraction of Removed Nodes', fontsize=20)
     plt.ylabel('Normalized LCC Size', fontsize=20)
     # plt.title('Dismantling Methods Comparison', fontsize=14)
-    plt.legend(fontsize=16)
+    plt.legend(fontsize=12, loc="upper right")
     plt.grid(True, alpha=0.3)
     plt.xlim(0.0, max_fraction_removed if max_fraction_removed > 0 else 1.0)
     plt.ylim(0, 1)

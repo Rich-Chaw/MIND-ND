@@ -69,6 +69,10 @@ class Args:
     """node initial features: None = all ones, 'RW' = random walk return-probability encoding"""
     handcrafted_features: bool = False
     """if True, use 5 handcrafted features: degree, avg_degree_neighbor, local_clustering, k_core, 1 (num_features forced to 5)"""
+    init_graph: bool = False
+    """if True, precompute and persist initial node features in graph vertex attributes"""
+    init_method: str = 'ONES'
+    """initial node feature method for env graph_data, e.g. ONES or RANDOM"""
 
     reward_type: Optional[int] = 0
     """0: -LCC_t/N   1:(LCC_t-1 - LCC_t) / N """
@@ -139,6 +143,9 @@ if __name__ == "__main__":
         is_val=True, 
         seed=args.seed
     )
+    if args.init_graph:
+        env.init_features(args.num_features, init_method=args.init_method, attr_name='x_init')
+        env_val.init_features(args.num_features, init_method=args.init_method, attr_name='x_init')
     
     buffer = ReplayBuffer(args.buffer_size, device)
 

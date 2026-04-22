@@ -146,6 +146,10 @@ class Args:
     """node initial features: None = all ones, 'RW' = random walk return-probability encoding"""
     handcrafted_features: bool = False
     """if True, use 5 handcrafted features: degree, avg_degree_neighbor, local_clustering, k_core, 1 (num_features forced to 5)"""
+    init_graph: bool = False
+    """if True, precompute and persist initial node features in graph vertex attributes"""
+    init_method: str = 'ONES'
+    """initial node feature method for env graph_data, e.g. ONES or RANDOM"""
 
     # dataset directories
     train_dir: List[str] = field(default_factory=lambda: [
@@ -229,6 +233,11 @@ if __name__ == "__main__":
         )
     else:
         env_demo = env
+    if args.init_graph:
+        env.init_features(args.num_features, init_method=args.init_method, attr_name='x_init')
+        env_val.init_features(args.num_features, init_method=args.init_method, attr_name='x_init')
+        if env_demo is not env:
+            env_demo.init_features(args.num_features, init_method=args.init_method, attr_name='x_init')
         
     buffer = PriorReplayBuffer(args.buffer_size, device)
 
@@ -628,16 +637,24 @@ if __name__ == "__main__":
                     
                     policy_optimizer.zero_grad(); policy_loss.backward(); policy_optimizer.step()
 
-                    # ---------------  ADAPTIVE ALPHA (minimize J(alpha) = E[-alpha*log pi(a|s) - alpha*H_bar]) ---------------
+                    # ---------------  ADAPTIVE ALPHA (entropy matching on current policy) ---------------
                     alpha_loss = None
                     if args.alpha_adaptive:
-                        logp_taken = logp_b.gather(0, act_b).flatten().detach()
-                        alpha_loss = (alpha * (-logp_taken - args.target_entropy)).mean()
+                        with torch.no_grad():
+                            pi = logp_b.exp()
+                            # Categorical entropy per graph: H = -sum_i pi_i log pi_i (nats).
+                            entropy_per_graph = scatter_add(
+                                -(pi * logp_b), obs_b.batch_non_omni, dim_size=obs_b.batch_size
+                            )
+                        # Minimize alpha * (H_target - H_pi):
+                        # if H_pi < H_target -> increase alpha (encourage exploration),
+                        # if H_pi > H_target -> decrease alpha.
+                        alpha_loss = (alpha * (args.target_entropy - entropy_per_graph.detach())).mean()
                         alpha_optimizer.zero_grad()
                         alpha_loss.backward()
                         alpha_optimizer.step()
                         if args.use_tb and num_updates % args.target_frequency == 0:
-                            writer.add_scalar("entropy/entropy",logp_b.mean().item(), global_step)
+                            writer.add_scalar("entropy/entropy", entropy_per_graph.mean().item(), global_step)
                             writer.add_scalar("entropy/alpha", alpha.item(), global_step)
                             writer.add_scalar("entropy/alpha_loss", alpha_loss.item(), global_step)
                 
