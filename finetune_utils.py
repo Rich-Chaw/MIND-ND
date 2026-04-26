@@ -4,6 +4,7 @@ import igraph as ig
 import gc
 from torch_scatter import scatter_add
 from utils import Batch, ig_to_data
+from utils.core import core2_size, max_ci_in_max_core
 
 
 def teacher_wrapper(graph, teacher_method='spectral', max_steps=None):
@@ -214,51 +215,76 @@ def teacher_step(obs_list, teacher_method='spectral'):
     return act_arr, obs_next_list, rew_arr, done_arr
 
 
-def compute_reward_shaping(obs_list, act_arr, shaping_method='betweenness', policy=None, discriminator=None, teacher_method='spectral', temperature=2.0, device='cuda'):
+def compute_reward_shaping(
+    obs_list,
+    act_arr,
+    shaping_method='betweenness',
+    policy=None,
+    discriminator=None,
+    teacher_method='spectral',
+    temperature=2.0,
+    device='cuda',
+    gamma: float = 0.99,
+):
     """
     Unified reward shaping function supporting multiple methods
     
     Args:
         obs_list: List of graph observations
         act_arr: Array of selected actions
-        shaping_method: 'betweenness', 'KL', or 'core'
+        shaping_method: 'betweenness', 'KL', 'core', or 'core_ci' (for core/core_ci, call DismantleEnv.init_core on graph_data so s0 is fixed at episode start)
         policy: Policy network (required for KL method)
         teacher_method: Teacher method for KL divergence ('spectral' or 'betweenness')
         temperature: Temperature for teacher probabilities
         device: Device for computations
+        gamma: Discount factor used by PBRS for core/core_ci
     
     Returns:
         shaping_rewards: Array of shaping rewards
     """
     shaping_rewards = np.zeros(len(obs_list), dtype=np.float32)
 
-    def _core2_size(g):
-        """Size of 2-core: number of vertices with coreness >= 2."""
-        if g.vcount() == 0 or g.ecount() == 0:
-            return 0
-        coreness = g.coreness()
-        return sum(1 for k in coreness if k >= 2)
-
-    if shaping_method == 'core':
-        # Shaping reward = (Core_2(s) - Core_2(s')) / Core_2(s_0)
+    if shaping_method in ("core", "core_ci"):
+        # PBRS form with Phi(s) = -norm(s):
+        # F(s, a, s') = gamma * Phi(s') - Phi(s) = norm(s) - gamma * norm(s')
+        # s0 from DismantleEnv.init_core on graph_data; preserved on GraphPool g.copy()
         for i, graph in enumerate(obs_list):
             if graph.vcount() <= 0 or graph.ecount() == 0:
                 shaping_rewards[i] = 0.0
                 continue
-            core2_s0 = graph['core2_init']
-            if core2_s0 <= 0:
-                shaping_rewards[i] = 0.0
-                continue
-            core2_s = _core2_size(graph)
-            # s' = graph after removing action node
+
+            if shaping_method == "core":
+                if "core2_init" not in graph.attributes():
+                    raise ValueError(
+                        "Missing 'core2_init': call env.init_core(reward_shaping=True, shaping_method='core') on graph_data first."
+                    )
+                s0 = float(graph["core2_init"])
+                if s0 <= 0:
+                    shaping_rewards[i] = 0.0
+                    continue
+                v_s = float(core2_size(graph))
+            else:
+                if "core_ci_init" not in graph.attributes():
+                    raise ValueError(
+                        "Missing 'core_ci_init': call env.init_core(reward_shaping=True, shaping_method='core_ci') on graph_data first."
+                    )
+                s0 = float(graph["core_ci_init"])
+                if s0 <= 0:
+                    shaping_rewards[i] = 0.0
+                    continue
+                v_s = float(max_ci_in_max_core(graph))
+
             g_next = graph.copy()
             action_idx = int(act_arr[i])
             if action_idx >= g_next.vcount():
                 shaping_rewards[i] = 0.0
                 continue
             g_next.delete_vertices(action_idx)
-            core2_s_next = _core2_size(g_next)
-            shaping_rewards[i] = (core2_s - core2_s_next) / float(core2_s0)
+            v_next = float(core2_size(g_next)) if shaping_method == "core" else float(max_ci_in_max_core(g_next))
+            denom = s0 + 1e-8
+            norm_s = v_s / denom
+            norm_s_next = v_next / denom
+            shaping_rewards[i] = norm_s - float(gamma) * norm_s_next
             del g_next
 
     elif shaping_method == 'betweenness':

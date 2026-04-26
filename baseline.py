@@ -780,6 +780,20 @@ def TSAM_dismantling(graph, max_steps=None, threshold=0.1):
     removals, score, MaxCCList, runtime = TSAM_wrapper(graph, threshold=threshold)
     return removals, runtime
 
+def DrBC_dismantling(graph, max_steps=None, threshold=0.1):
+    from baseline_rl.DrBC import DrBC_wrapper
+    removals, score, MaxCCList, runtime = DrBC_wrapper(
+        graph, threshold=threshold, max_steps=max_steps
+    )
+    return removals, runtime
+
+def ABCDE_dismantling(graph, max_steps=None, threshold=0.1):
+    from baseline_rl.ABCDE import ABCDE_wrapper
+    removals, score, MaxCCList, runtime = ABCDE_wrapper(
+        graph, adaptive=True, threshold=threshold, max_steps=max_steps, device="cpu"
+    )
+    return removals, runtime
+
 METHODS.update({
     "FINDER": FINDER_dismantling,
     "NIRM": NIRM_dismantling,
@@ -788,6 +802,8 @@ METHODS.update({
     "CoreGDM": CoreGDM_dismantling,
     "DomiRank": DomiRank_dismantling,
     "TSAM": TSAM_dismantling,
+    "DrBC": DrBC_dismantling,
+    "ABCDE": ABCDE_dismantling,
 })
 
 

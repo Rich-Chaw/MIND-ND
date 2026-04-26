@@ -142,30 +142,35 @@ def sample_real_subgraphs(
     num_subgraphs: int,
     min_nodes: int = 200,
     max_nodes: int = 500,
-    ratio: List[float] = [0.4, 0.4, 0.2], # rw, mhrw, ff
-    do_analyze: bool = False,
+    ratio: List[float] = [0.4, 0.4, 0.2],  # [rw, mhrw, ff]
 ) -> List[ig.Graph]:
+
     if len(real_graphs) == 0:
         raise ValueError("real_graphs is empty")
+    s = float(sum(ratio))
+    p = [r / s for r in ratio]
+
     out = []
+    methods = ["rw", "mhrw", "ff"]
+
     for i in range(num_subgraphs):
         src = random.choice(real_graphs)
         target_size = random.randint(min_nodes, max_nodes)
-        use_rw = random.random() < rw_ratio
-        if use_rw:
+        if src.vcount() < target_size:
+            continue
+        method = random.choices(methods, weights=p, k=1)[0]
+
+        if method == "rw":
             sg = random_walk_subgraph(src, target_size=target_size)
-            method = "rw"
-        elif use_mhrw:
+        elif method == "mhrw":
             sg = mhrw_subgraph(src, target_size=target_size)
-            method = "mhrw"
         else:
             sg = forest_fire_subgraph(src, target_size=target_size)
-            method = "ff"
+
         sg["name"] = f"{src['name']}_sub_{method}_{i}"
         sg["type"] = "real"
         out.append(sg)
-        if do_analyze and i < 3:
-            analyze_graph(src, sg, title=sg["name"])
+
     return out
 
 

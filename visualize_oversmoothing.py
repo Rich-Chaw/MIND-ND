@@ -9,8 +9,11 @@ import torch
 import torch.nn.functional as F
 
 from networks.classical_gnns import GAT, GCN, GraphSAGE
+from networks.esan import ESANEncoder
 from networks.gcnii import GCNII
 from networks.idgnn import IDGCN
+from networks.mind import MIND
+from networks.nagphormer import NAGphormerEncoder
 from networks.rfgnn import ResiflowGNN
 from utils.graph_data import Batch, Graph
 
@@ -29,6 +32,9 @@ MODEL_REGISTRY = {
     "GAT": GAT,
     "IDGNN": IDGCN,
     "GCNII": GCNII,
+    "MIND": MIND,
+    "ESAN": ESANEncoder,
+    "NAGphormer": NAGphormerEncoder,
     "ResiFlow-GNN": ResiflowGNN,
 }
 
@@ -38,6 +44,9 @@ MODEL_COLORS = {
     "GAT": "#2ca02c",
     "IDGNN": "#9467bd",
     "GCNII": "#8c564b",
+    "MIND": "#e377c2",
+    "ESAN": "#17becf",
+    "NAGphormer": "#bcbd22",
     "ResiFlow-GNN": "#d62728",
 }
 
@@ -146,6 +155,17 @@ def compute_layer_metrics(x: torch.Tensor, batch: Batch) -> Dict[str, float]:
     }
 
 
+def _nagphormer_layer_node_embedding(model: NAGphormerEncoder, tokens: torch.Tensor) -> torch.Tensor:
+    output = model.final_ln(tokens)
+    node_token = output[:, 0:1, :]
+    hop_tokens = output[:, 1:, :]
+    target = node_token.expand(-1, model.hops, -1)
+    hop_scores = model.attn_layer(torch.cat((target, hop_tokens), dim=-1)).squeeze(-1)
+    hop_weights = torch.softmax(hop_scores, dim=1).unsqueeze(-1)
+    hop_ctx = torch.sum(hop_tokens * hop_weights, dim=1)
+    return model.profile_act(model.out_proj(node_token.squeeze(1) + hop_ctx))
+
+
 @torch.no_grad()
 def extract_layer_embeddings_and_metrics(
     model_name: str,
@@ -177,6 +197,26 @@ def extract_layer_embeddings_and_metrics(
                 x = F.normalize(x, p=2, dim=-1, eps=1e-12)
             collapse_by_layer.append(compute_collapse_distances(x, batch))
             metric_list.append(compute_layer_metrics(x, batch))
+    elif model_name == "ESAN":
+        for k, conv in enumerate(model.convs):
+            x = conv(x, batch.edge_index)
+            x = model.bns[k](x)
+            x = F.relu(x)
+            x = F.normalize(x, p=2, dim=-1)
+            if use_l2_norm:
+                x = F.normalize(x, p=2, dim=-1, eps=1e-12)
+            collapse_by_layer.append(compute_collapse_distances(x, batch))
+            metric_list.append(compute_layer_metrics(x, batch))
+    elif model_name == "NAGphormer":
+        tokens = model._build_hop_tokens(x, batch.edge_index)
+        tokens = model.token_proj(tokens)
+        for layer in model.layers:
+            tokens = layer(tokens)
+            x_layer = _nagphormer_layer_node_embedding(model, tokens)
+            if use_l2_norm:
+                x_layer = F.normalize(x_layer, p=2, dim=-1, eps=1e-12)
+            collapse_by_layer.append(compute_collapse_distances(x_layer, batch))
+            metric_list.append(compute_layer_metrics(x_layer, batch))
     elif model_name == "GCNII":
         adj = torch.sparse_coo_tensor(
             batch.edge_index,
@@ -294,7 +334,7 @@ def main() -> None:
     )
 
     results_by_model: Dict[str, Dict[str, List]] = {}
-    for model_name in ["GCN", "GraphSAGE", "GAT", "IDGNN", "GCNII", "ResiFlow-GNN"]:
+    for model_name in ["GCN", "GraphSAGE", "GAT", "IDGNN", "GCNII", "MIND", "ESAN", "NAGphormer", "ResiFlow-GNN"]:
     # for model_name in ["GCN", "GraphSAGE", "GAT"]:
         results_by_model[model_name] = extract_layer_embeddings_and_metrics(
             model_name=model_name,

@@ -88,17 +88,25 @@ class Batch:
         self.batch_non_omni = self.batch[self.non_omni_mask] #(N)
 
         self.x_init = None
-        feat_dim = next(
-            (int(g.init_features.shape[1]) for g in graph_array if g.init_features is not None),
-            None
-        )
+        feat_dim = None
+        for g in graph_array:
+            if not hasattr(g, "init_features"):
+                feat_dim = None
+                break
+            init_features = g.init_features
+            if init_features is None:
+                continue
+            feats_np = np.asarray(init_features)
+            feat_dim = int(feats_np.shape[1] if feats_np.ndim >= 2 else 1)
+            break
         if feat_dim is not None:
             x_init = torch.zeros(self.total_nodes, feat_dim, dtype=torch.float32, device=self.device)
             for start_id, n_all, graph in zip(start_ids, num_nodes_b, graph_array):
-                if graph.init_features is None:
+                init_features = getattr(graph, "init_features", None)
+                if init_features is None:
                     continue
                 n_non_omni = int(n_all - 1)
-                feats_np = np.asarray(graph.init_features, dtype=np.float32)
+                feats_np = np.asarray(init_features, dtype=np.float32)
                 if feats_np.ndim == 1:
                     feats_np = feats_np.reshape(n_non_omni, 1)
                 if feats_np.shape != (n_non_omni, feat_dim):
@@ -109,7 +117,6 @@ class Batch:
                     feats_np, dtype=torch.float32, device=self.device
                 )
             self.x_init = x_init
-
 
 def random_walk_positional_encoding(batch, num_features, device):
     """

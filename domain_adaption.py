@@ -15,31 +15,34 @@ from torch_scatter import scatter_log_softmax, scatter_mean
 
 from env import DismantleEnv
 from networks.dismantle import load_sac_dismantler
-from utils import load_g, AdaptionBuffer, Batch, ig_to_data
+from utils import load_g, AdaptionBuffer, Batch, ig_to_data, validate
 from utils.sample import sample_real_subgraphs
 
 
 @dataclass
 class Args:
-    ckpt_pth: str
+    ckpt_pth: str = 'saved/rfgnn/sac_teacher_20260421_065917/19999.ckpt'
     train_synth_dir: List[str] = field(default_factory=lambda: ["graphs/train/100_150_SBM_DCSBM_LPA_COPY_ER_6000"])
-    train_real_dir: List[str] = field(default_factory=lambda: ["graphs/train/real"])
+    train_real_dir: List[str] = field(default_factory=lambda: ["graphs/domain"])
 
     seed: int = 0
     device: str = "cuda:0"
     num_envs: int = 64
     total_steps: int = 20000
     learning_starts: int = 500
-    num_updates: int = 8
+    num_updates: int = 6
     batch_size: int = 128
     buffer_size: int = 200000
     save_frequency: int = 1000
+    val_frequency: int = 100
 
     # real subgraph sampling
-    num_real_subgraphs: int = 200
+    num_real_subgraphs: int = 2000
     subgraph_min_nodes: int = 200
-    subgraph_max_nodes: int = 500
-    rw_ratio: float = 0.5
+    subgraph_max_nodes: int = 400
+    
+    ratio: List[float] = field(default_factory=lambda: [0.4, 0.4, 0.2])  # [rw, mhrw, ff]
+    val_ratio: float = 0.01
 
     # adaptation objective
     lambda_coral: float = 0.1
@@ -100,19 +103,35 @@ if __name__ == "__main__":
         num_subgraphs=args.num_real_subgraphs,
         min_nodes=args.subgraph_min_nodes,
         max_nodes=args.subgraph_max_nodes,
-        rw_ratio=args.rw_ratio
+        ratio=args.ratio
     )
 
     mixed_graphs = synth_graphs + sampled_real
-    print(f"synth={len(synth_graphs)} real_subgraphs={len(sampled_real)} total={len(mixed_graphs)}")
+    if len(mixed_graphs) < 2:
+        raise ValueError("Need at least 2 graphs in mixed_graphs to split train/val.")
+    random.shuffle(mixed_graphs)
+    val_size = max(1, int(len(mixed_graphs) * args.val_ratio))
+    val_size = min(val_size, len(mixed_graphs) - 1)
+    val_graphs = mixed_graphs[:val_size]
+    train_graphs = mixed_graphs[val_size:]
+    print(
+        f"synth={len(synth_graphs)} real_subgraphs={len(sampled_real)} "
+        f"train={len(train_graphs)} val={len(val_graphs)}"
+    )
 
     # 2) env and adaptation buffer
     env = DismantleEnv(
-        graph_data=mixed_graphs,
+        graph_data=train_graphs,
         batch_size=args.num_envs,
         is_val=False,
         seed=args.seed,
         remove_scc=False,
+    )
+    env_val = DismantleEnv(
+        graph_data=val_graphs,
+        batch_size=args.num_envs,
+        is_val=True,
+        seed=args.seed,
     )
     buffer = AdaptionBuffer(args.buffer_size, device)
 
@@ -192,6 +211,10 @@ if __name__ == "__main__":
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
+        if step % args.val_frequency == 0 and step >= args.learning_starts:
+            val_auc_list = validate(env_val, policy)[0]
+            auc_val_avg = sum(val_auc_list) / max(len(val_auc_list), 1)
+            print(f"At step {step}, Avg. Validation AUC is {auc_val_avg:.4f}")
 
         if (step + 1) % 50 == 0:
             dt = time.time() - t0

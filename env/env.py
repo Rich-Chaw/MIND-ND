@@ -6,6 +6,7 @@ from typing import List, Union, Optional
 from env.graph_pool import GraphPool
 from utils import plot_process, load_g
 from utils.graph_data import _set_init_features
+from utils.core import set_core_inits
 
 
 class DismantleEnv:
@@ -68,6 +69,19 @@ class DismantleEnv:
             init_method=init_method,
             attr_name=attr_name,
         )
+
+    def init_core(self, reward_shaping: bool = False, shaping_method: str = "KL") -> None:
+        """
+        Precompute graph attributes `core2_init` or `core_ci_init` on every graph in
+        `graph_data` (episode start, full graph). Same idea as init_features: copies
+        taken by GraphPool keep these attributes, so s0 is fixed for the whole trajectory.
+        Call when reward_shaping is enabled and shaping_method is 'core' or 'core_ci'.
+        """
+        if not self.graph_data or not reward_shaping:
+            return
+        if shaping_method not in ("core", "core_ci"):
+            return
+        set_core_inits(self.graph_data, shaping_method)
 
     def reset(self):
         self.pool = GraphPool(

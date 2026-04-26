@@ -15,7 +15,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from env import DismantleEnv
 from networks.dismantle import load_sac_dismantler
-from utils import ReplayBuffer, PriorReplayBuffer, Batch, validate, validate, ig_to_data
+from utils import ReplayBuffer, PriorReplayBuffer, Batch, validate, ig_to_data
 import torch.nn.functional as F
 import gc
 import json
@@ -124,7 +124,7 @@ class Args:
     reward_shaping: bool = False
     """Enable reward shaping"""
     shaping_method: str = 'KL'
-    """Reward shaping method: 'betweenness' or 'KL'"""
+    """Reward shaping method: e.g. 'betweenness', 'KL', 'core', 'core_ci'"""
     shaping_decay: bool = False
     shaping_decay_steps: int = 10000
     """Number of steps to decay reward shaping coefficient"""
@@ -238,7 +238,13 @@ if __name__ == "__main__":
         env_val.init_features(args.num_features, init_method=args.init_method, attr_name='x_init')
         if env_demo is not env:
             env_demo.init_features(args.num_features, init_method=args.init_method, attr_name='x_init')
-        
+
+    if args.reward_shaping and args.shaping_method in ("core", "core_ci"):
+        env.init_core(reward_shaping=True, shaping_method=args.shaping_method)
+        env_val.init_core(reward_shaping=True, shaping_method=args.shaping_method)
+        if env_demo is not env:
+            env_demo.init_core(reward_shaping=True, shaping_method=args.shaping_method)
+
     buffer = PriorReplayBuffer(args.buffer_size, device)
 
     # Load pretrained network
@@ -267,6 +273,24 @@ if __name__ == "__main__":
                     act_arr.append(teacher_action)
                 
                 obs_next_list, rew_arr, done_arr, info_list = env_demo.step(np.array(act_arr))
+
+                # Align stored reward with main SAC loop: R = r_env + β * F (demo uses fixed β, no decay)
+                if args.reward_shaping:
+                    beta_t = args.shaping_coeff
+                    act_np = np.asarray(act_arr, dtype=np.int64)
+                    rew_shaping = compute_reward_shaping(
+                            obs_list,
+                            act_np,
+                            shaping_method=args.shaping_method,
+                            policy=policy,
+                            discriminator=None,
+                            teacher_method=args.teacher_method,
+                            temperature=1.0,
+                            device=device,
+                    )
+                    # Keep shaping on the same scale as base reward.
+                    rew_shaping = np.clip(rew_shaping, -1.0, 1.0)
+                    rew_arr = rew_arr + beta_t * rew_shaping
                     
                 # Add to teacher buffer
                 buffer.add(obs_list, act_arr, obs_next_list, rew_arr, done_arr, from_teacher=True,fixed=True)
@@ -462,6 +486,8 @@ if __name__ == "__main__":
                     temperature=1.0,
                     device=device
                 )
+                # Keep shaping on the same scale as base reward.
+                rew_shaping = np.clip(rew_shaping, -1.0, 1.0)
                 
                 # Apply shaping: R_total = R_LCC + β(t) * shaping_reward
                 rew_arr = rew_arr + beta_t * rew_shaping
